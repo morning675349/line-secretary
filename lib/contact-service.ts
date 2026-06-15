@@ -111,6 +111,15 @@ export async function consumePendingSource(lineUserId: string): Promise<string |
   return contactId
 }
 
+// 取得最近一筆聯絡人（場合輸入時的 fallback）
+export async function getLatestContact(lineUserId: string): Promise<Contact | null> {
+  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
+  const contacts = snap.docs
+    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+    .sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))
+  return contacts[0] || null
+}
+
 // 統計
 export interface ContactStats {
   total: number

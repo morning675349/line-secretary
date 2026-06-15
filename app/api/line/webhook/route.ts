@@ -13,7 +13,7 @@ import {
   saveContact, getPendingFollowUps, searchContacts,
   updateContactStatus, updateContactSource, updateContactField,
   addContactNote, findContactByName, getContactStats,
-  setPendingSource, consumePendingSource,
+  setPendingSource, consumePendingSource, getLatestContact,
 } from '@/lib/contact-service'
 import { parseSchedule } from '@/lib/schedule-parser'
 import { createCalendarEvent, getAuthUrl, isCalendarConnected } from '@/lib/google-calendar'
@@ -88,13 +88,17 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     return
   }
 
-  // 自訂場合（接續「其他場合」按鈕後的輸入）
+  // 自訂場合（可直接打，或接續「其他場合」按鈕後輸入）
   const customSourceMatch = t.match(/^場合名稱：?(.+)$/)
   if (customSourceMatch) {
     const sourceName = customSourceMatch[1].trim()
-    const contactId = await consumePendingSource(lineUserId)
+    let contactId = await consumePendingSource(lineUserId)
     if (!contactId) {
-      await replyMessage(replyToken, '⚠️ 找不到對應名片，請重新掃描後再選場合')
+      const latest = await getLatestContact(lineUserId)
+      contactId = latest?.id || null
+    }
+    if (!contactId) {
+      await replyMessage(replyToken, '⚠️ 找不到對應名片，請先掃描名片')
       return
     }
     await updateContactSource(contactId, sourceName)
