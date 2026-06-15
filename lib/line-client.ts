@@ -66,7 +66,6 @@ export async function pushAnalysisWithCorrect(userId: string, text: string, cont
                   type: 'postback',
                   label: '✏️ 修正名字',
                   data: `correct_name:${contactId}`,
-                  inputOption: 'openKeyboard',
                   inputOption: 'closeKeyboard',
                 },
               },
