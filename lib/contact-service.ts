@@ -35,13 +35,13 @@ export async function getPendingFollowUps(lineUserId: string): Promise<Contact[]
   const snap = await db
     .collection('contacts')
     .where('lineUserId', '==', lineUserId)
-    .where('status', '==', '待跟進')
-    .where('followUpAt', '<=', now)
-    .orderBy('followUpAt')
-    .limit(5)
     .get()
 
-  return snap.docs.map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  return snap.docs
+    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+    .filter(c => c.status === '待跟進' && c.followUpAt && c.followUpAt <= now)
+    .sort((a, b) => a.followUpAt.seconds - b.followUpAt.seconds)
+    .slice(0, 5)
 }
 
 export async function updateContactStatus(contactId: string, status: Contact['status']): Promise<void> {
@@ -72,22 +72,23 @@ export async function searchContacts(lineUserId: string, query: string): Promise
   const snap = await db
     .collection('contacts')
     .where('lineUserId', '==', lineUserId)
-    .orderBy('score', 'desc')
-    .limit(50)
     .get()
 
   const contacts = snap.docs.map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
   const q = query.toLowerCase()
-  return contacts.filter(
-    (c: Contact) =>
-      c.nameZh?.includes(q) ||
-      c.nameEn?.toLowerCase().includes(q) ||
-      c.company?.includes(q) ||
-      c.companyEn?.toLowerCase().includes(q) ||
-      c.category?.includes(q) ||
-      c.title?.includes(q) ||
-      c.industry?.includes(q)
-  ).slice(0, 5)
+  return contacts
+    .filter(
+      (c: Contact) =>
+        c.nameZh?.includes(q) ||
+        c.nameEn?.toLowerCase().includes(q) ||
+        c.company?.includes(q) ||
+        c.companyEn?.toLowerCase().includes(q) ||
+        c.category?.includes(q) ||
+        c.title?.includes(q) ||
+        c.industry?.includes(q)
+    )
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, 5)
 }
 
 // 依姓名或公司找單一聯絡人（用於狀態更新）
