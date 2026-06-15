@@ -67,7 +67,7 @@ export async function pushAnalysisWithCorrect(userId: string, text: string, cont
                   label: '✏️ 修正名字',
                   data: `correct_name:${contactId}`,
                   inputOption: 'openKeyboard',
-                  fillInText: '修正名字：',
+                  fillInText: `修正名字： ${contactId} `,
                 },
               },
               {
@@ -77,7 +77,7 @@ export async function pushAnalysisWithCorrect(userId: string, text: string, cont
                   label: '✏️ 修正公司',
                   data: `correct_company:${contactId}`,
                   inputOption: 'openKeyboard',
-                  fillInText: '修正公司：',
+                  fillInText: `修正公司： ${contactId} `,
                 },
               },
             ],

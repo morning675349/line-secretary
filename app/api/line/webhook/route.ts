@@ -13,6 +13,7 @@ import {
   saveContact, getPendingFollowUps, searchContacts,
   updateContactStatus, updateContactSource, updateContactField,
   addContactNote, findContactByName, getContactStats,
+  setPendingSource, consumePendingSource,
 } from '@/lib/contact-service'
 import { parseSchedule } from '@/lib/schedule-parser'
 import { createCalendarEvent, getAuthUrl, isCalendarConnected } from '@/lib/google-calendar'
@@ -42,15 +43,23 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
 }
 
 // ── Postback 處理 ────────────────────────────────────────────
-async function handlePostback(data: string, replyToken: string) {
-  const fixedMatch = data.match(/^src:(.+):(\w+)$/)
-  if (fixedMatch) {
-    const [, source, contactId] = fixedMatch
+async function handlePostback(data: string, replyToken: string, lineUserId: string) {
+  // BNI / 轉型創新協會 等固定場合
+  const srcMatch = data.match(/^src:(.+):(\w+)$/)
+  if (srcMatch) {
+    const [, source, contactId] = srcMatch
     await updateContactSource(contactId, source)
-    await replyMessage(replyToken, `✅ 已記錄：${source}`)
+    await replyMessage(replyToken, `✅ 已記錄場合：${source}`)
     return
   }
-  // src_other → 等用戶輸入，由 handleTextMessage 處理
+
+  // 其他場合 → 存 pending，等用戶輸入場合名稱
+  const otherMatch = data.match(/^src_other:(\w+)$/)
+  if (otherMatch) {
+    await setPendingSource(lineUserId, otherMatch[1])
+    await replyMessage(replyToken, '請直接輸入場合名稱，例如：\nBNI台中南區')
+    return
+  }
 }
 
 // ── 文字指令 ────────────────────────────────────────────────
@@ -79,14 +88,17 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     return
   }
 
-  // 自訂場合：「場合名稱：BNI台中南區 contactId」
-  const customSourceMatch = t.match(/^場合名稱：(.+)$/)
+  // 自訂場合（接續「其他場合」按鈕後的輸入）
+  const customSourceMatch = t.match(/^場合名稱：?(.+)$/)
   if (customSourceMatch) {
-    const parts = customSourceMatch[1].trim().split(' ')
-    const contactId = parts[parts.length - 1]
-    const source = parts.slice(0, -1).join(' ') || parts[0]
-    await updateContactSource(contactId, source.trim())
-    await replyMessage(replyToken, `✅ 已記錄場合：${source.trim()}`)
+    const sourceName = customSourceMatch[1].trim()
+    const contactId = await consumePendingSource(lineUserId)
+    if (!contactId) {
+      await replyMessage(replyToken, '⚠️ 找不到對應名片，請重新掃描後再選場合')
+      return
+    }
+    await updateContactSource(contactId, sourceName)
+    await replyMessage(replyToken, `✅ 已記錄場合：${sourceName}`)
     return
   }
 
@@ -333,7 +345,7 @@ export async function POST(req: NextRequest) {
           await handleTextMessage(message.text, replyToken, lineUserId)
         }
       } else if (event.type === 'postback') {
-        await handlePostback(event.postback.data, replyToken)
+        await handlePostback(event.postback.data, replyToken, lineUserId)
       }
     } catch (err) {
       console.error('Event handling error:', err)

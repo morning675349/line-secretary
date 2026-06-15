@@ -97,6 +97,20 @@ export async function findContactByName(lineUserId: string, name: string): Promi
   return results[0] || null
 }
 
+// 暫存「其他場合」等待用戶輸入
+export async function setPendingSource(lineUserId: string, contactId: string): Promise<void> {
+  await db.collection('users').doc(lineUserId).set({ pendingSource: contactId }, { merge: true })
+}
+
+export async function consumePendingSource(lineUserId: string): Promise<string | null> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  const contactId = doc.data()?.pendingSource || null
+  if (contactId) {
+    await db.collection('users').doc(lineUserId).update({ pendingSource: FieldValue.delete() })
+  }
+  return contactId
+}
+
 // 統計
 export interface ContactStats {
   total: number
