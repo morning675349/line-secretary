@@ -125,6 +125,15 @@ export async function pushSourceQuickReply(userId: string, contactId: string): P
                 type: 'action',
                 action: {
                   type: 'postback',
+                  label: '製造業採購群',
+                  data: `src:製造業採購群:${contactId}`,
+                  displayText: '製造業採購群',
+                },
+              },
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
                   label: '其他場合',
                   data: `src_other:${contactId}`,
                   inputOption: 'openKeyboard',
