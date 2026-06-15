@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import sharp from 'sharp'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -89,13 +90,20 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 
 未識別的欄位填空字串或空陣列。`
 
-export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
-  const base64 = imageBuffer.toString('base64')
+// Pass 1：純 OCR，只提取文字，不做任何推斷
+async function extractRawText(imageBuffer: Buffer): Promise<string> {
+  // 預處理：銳化 + 正規化對比，幫助模型看清楚細節
+  const processed = await sharp(imageBuffer)
+    .sharpen({ sigma: 1.2 })
+    .normalise()
+    .jpeg({ quality: 95 })
+    .toBuffer()
+
+  const base64 = processed.toString('base64')
 
   const response = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: [
@@ -103,8 +111,41 @@ export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
             type: 'image_url',
             image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' },
           },
-          { type: 'text', text: '請仔細辨識名片上所有資訊，回傳完整 JSON。' },
+          {
+            type: 'text',
+            text: `請精確辨識這張名片上的所有文字，逐行列出，保持原始格式。
+
+重要規則：
+1. 看不清楚的字用【?】標記，絕對不要猜測
+2. 中文字要逐筆確認，筆畫相似的字（傑/焰/燁/煜、銘/鉞/銓/鎧、振/展/傳/博）寧可標【?】也不要猜
+3. 如果名片有英文拼音，用來交叉驗證中文名
+4. 電話號碼完整列出，不要省略
+5. 只輸出名片上看到的內容，不要增加任何推測`,
+          },
         ],
+      },
+    ],
+    max_tokens: 600,
+  })
+
+  return response.choices[0].message.content || ''
+}
+
+// Pass 2：純文字分析，把 OCR 結果解析成結構化 JSON
+export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
+  const rawText = await extractRawText(imageBuffer)
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: `以下是從名片辨識出的原始文字（【?】代表不確定的字）：
+
+${rawText}
+
+請根據以上文字解析成完整 JSON。若欄位中有【?】，在該欄位後加上 (待確認) 提示。`,
       },
     ],
     response_format: { type: 'json_object' },
