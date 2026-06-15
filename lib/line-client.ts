@@ -1,7 +1,8 @@
 const LINE_API = 'https://api.line.me/v2/bot'
+const LINE_DATA_API = 'https://api-data.line.me/v2/bot'
 
 export async function downloadLineImage(messageId: string): Promise<Buffer> {
-  const res = await fetch(`${LINE_API}/message/${messageId}/content`, {
+  const res = await fetch(`${LINE_DATA_API}/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}` },
   })
   if (!res.ok) throw new Error(`LINE image download failed: ${res.status}`)
