@@ -59,7 +59,8 @@ async function handleTextMessage(
     }
     const lines = ['📋 需要跟進的聯絡人：', '']
     contacts.forEach((c, i) => {
-      lines.push(`${i + 1}. ${c.name}（${c.company}）`)
+      const name = c.nameZh || c.nameEn || '未知'
+      lines.push(`${i + 1}. ${name}（${c.company}）`)
       lines.push(`   ⭐ ${c.score}/10 · ${c.category}`)
       lines.push(`   💡 ${c.followUpSuggestion}`)
       lines.push('')
@@ -78,8 +79,9 @@ async function handleTextMessage(
     }
     const lines = [`🔍 搜尋「${query}」結果：`, '']
     contacts.slice(0, 5).forEach(c => {
-      lines.push(`👤 ${c.name} · ${c.company}`)
-      lines.push(`   ${c.title} · ${c.phone || c.email}`)
+      const name = c.nameZh || c.nameEn || '未知'
+      lines.push(`👤 ${name} · ${c.company}`)
+      lines.push(`   ${c.title} · ${c.mobile || c.officePhone || c.email}`)
       lines.push(`   ⭐ ${c.score}/10 · ${c.status}`)
       lines.push('')
     })

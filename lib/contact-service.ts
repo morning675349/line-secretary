@@ -62,9 +62,11 @@ export async function searchContacts(lineUserId: string, query: string): Promise
   const q = query.toLowerCase()
   return contacts.filter(
     (c: Contact) =>
-      c.name.includes(q) ||
-      c.company.includes(q) ||
-      c.category.includes(q) ||
-      c.title.includes(q)
+      c.nameZh?.includes(q) ||
+      c.nameEn?.toLowerCase().includes(q) ||
+      c.company?.includes(q) ||
+      c.companyEn?.toLowerCase().includes(q) ||
+      c.category?.includes(q) ||
+      c.title?.includes(q)
   )
 }

@@ -3,10 +3,15 @@ import OpenAI from 'openai'
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 export interface CardData {
-  name: string
+  nameZh: string
+  nameEn: string
   company: string
+  companyEn: string
   title: string
-  phone: string
+  titleEn: string
+  mobile: string
+  officePhone: string
+  fax: string
   email: string
   address: string
   website: string
@@ -17,7 +22,7 @@ export interface CardData {
   reasoning: string
 }
 
-const SYSTEM_PROMPT = `你是一個商業名片分析助手。
+const SYSTEM_PROMPT = `你是一個商業名片 OCR 與分析助手，請仔細辨識名片上每一個字，特別注意相似漢字。
 
 關於這位顧問的背景：
 - 主要服務：網站規劃（客製化）+ SEO顧問
@@ -43,14 +48,32 @@ const SYSTEM_PROMPT = `你是一個商業名片分析助手。
 - 分數4-6：7天
 - 分數1-3：30天
 
-回傳 JSON 格式，欄位：name, company, title, phone, email, address, website, score, category, followUpDays, followUpSuggestion, reasoning。
+回傳 JSON，欄位說明：
+- nameZh：中文姓名（沒有則空字串）
+- nameEn：英文姓名（沒有則空字串）
+- company：公司中文名稱（仔細辨識每個字）
+- companyEn：公司英文名稱（沒有則空字串）
+- title：職稱中文
+- titleEn：職稱英文（沒有則空字串）
+- mobile：手機號碼（沒有則空字串）
+- officePhone：公司電話（沒有則空字串）
+- fax：傳真（沒有則空字串）
+- email：電子郵件
+- address：地址
+- website：網站
+- score：評分 1-10
+- category：分類
+- followUpDays：跟進天數
+- followUpSuggestion：具體跟進建議（一句話）
+- reasoning：評分理由（一句話）
+
 未識別的欄位填空字串。`
 
 export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
   const base64 = imageBuffer.toString('base64')
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-4o',
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       {
@@ -60,12 +83,12 @@ export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
             type: 'image_url',
             image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' },
           },
-          { type: 'text', text: '請分析這張名片，萃取所有資訊並評分，回傳 JSON。' },
+          { type: 'text', text: '請仔細辨識名片上所有資訊，回傳完整 JSON。' },
         ],
       },
     ],
     response_format: { type: 'json_object' },
-    max_tokens: 800,
+    max_tokens: 1000,
   })
 
   const raw = response.choices[0].message.content || '{}'
@@ -74,22 +97,29 @@ export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
 
 export function formatCardReply(card: CardData, followUpDate: Date): string {
   const scoreBar = '⭐'.repeat(Math.round(card.score / 2))
+
+  const nameLine = [card.nameZh, card.nameEn].filter(Boolean).join('  ')
+  const companyLine = [card.company, card.companyEn].filter(Boolean).join('  ')
+  const titleLine = [card.title, card.titleEn].filter(Boolean).join('  ')
+
   const lines = [
     '✅ 名片分析完成！',
     '',
-    `👤 ${card.name}`,
-    card.title ? `💼 ${card.title}` : '',
-    `🏢 ${card.company}`,
-    card.phone ? `📱 ${card.phone}` : '',
+    nameLine ? `👤 ${nameLine}` : '',
+    titleLine ? `💼 ${titleLine}` : '',
+    companyLine ? `🏢 ${companyLine}` : '',
+    card.mobile ? `📱 ${card.mobile}` : '',
+    card.officePhone ? `☎️ ${card.officePhone}` : '',
+    card.fax ? `📠 ${card.fax}` : '',
     card.email ? `📧 ${card.email}` : '',
     card.website ? `🌐 ${card.website}` : '',
+    card.address ? `📍 ${card.address}` : '',
     '',
     `${scoreBar} 人脈評分：${card.score}/10`,
     `📌 分類：${card.category}`,
     `💡 ${card.followUpSuggestion}`,
     '',
-    `📅 跟進提醒：${followUpDate.toLocaleDateString('zh-TW')}`,
-    `（${card.followUpDays}天後）`,
+    `📅 跟進提醒：${followUpDate.toLocaleDateString('zh-TW')}（${card.followUpDays}天後）`,
   ]
   return lines.filter(Boolean).join('\n')
 }
