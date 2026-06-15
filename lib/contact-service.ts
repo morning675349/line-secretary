@@ -79,13 +79,13 @@ export async function searchContacts(lineUserId: string, query: string): Promise
   return contacts
     .filter(
       (c: Contact) =>
-        c.nameZh?.includes(q) ||
+        c.nameZh?.toLowerCase().includes(q) ||
         c.nameEn?.toLowerCase().includes(q) ||
-        c.company?.includes(q) ||
+        c.company?.toLowerCase().includes(q) ||
         c.companyEn?.toLowerCase().includes(q) ||
-        c.category?.includes(q) ||
-        c.title?.includes(q) ||
-        c.industry?.includes(q)
+        c.category?.toLowerCase().includes(q) ||
+        c.title?.toLowerCase().includes(q) ||
+        c.industry?.toLowerCase().includes(q)
     )
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, 5)
