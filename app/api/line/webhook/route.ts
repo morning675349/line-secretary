@@ -238,7 +238,18 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
     return
   }
 
-  if (t.startsWith('排程 ') || t.startsWith('行程 ') || t.startsWith('約 ')) {
+  if (t === '排程' || t === '行程') {
+    const connected = await isCalendarConnected(lineUserId)
+    if (!connected) {
+      const authUrl = getAuthUrl(lineUserId)
+      await replyMessage(replyToken, `需要先連結 Google Calendar：\n\n${authUrl}`)
+    } else {
+      await replyMessage(replyToken, '請輸入行程詳情，例如：\n\n排程 下週三下午3點跟林董在台中開會')
+    }
+    return
+  }
+
+  if (/^(排程|行程|約)\s+/.test(t)) {
     const scheduleText = t.replace(/^(排程|行程|約)\s+/, '')
     const connected = await isCalendarConnected(lineUserId)
     if (!connected) {
