@@ -14,6 +14,7 @@ import {
   updateContactStatus, updateContactSource, updateContactField,
   addContactNote, findContactByName, getContactStats,
   setPendingSource, consumePendingSource, getLatestContact,
+  setPendingNote, consumePendingNote,
 } from '@/lib/contact-service'
 import { parseSchedule } from '@/lib/schedule-parser'
 import { createCalendarEvent, getAuthUrl, isCalendarConnected } from '@/lib/google-calendar'
@@ -40,6 +41,12 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
 
   await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
   await pushSourceQuickReply(lineUserId, contactId)
+
+  if (!card.services || card.services.length === 0) {
+    await setPendingNote(lineUserId, contactId)
+    const name = card.nameZh || card.nameEn || '這位聯絡人'
+    await pushMessage(lineUserId, `🤔 ${name} 的名片沒有服務項目資訊\n你知道他們主要做什麼嗎？直接回覆我，我幫你存進去。`)
+  }
 }
 
 // ── Postback 處理 ────────────────────────────────────────────
@@ -299,6 +306,14 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
       lineUserId,
       `✅ 行程已建立！\n\n📅 ${parsed.title}\n🕐 ${timeStr}\n${parsed.location ? `📍 ${parsed.location}\n` : ''}${parsed.attendees ? `👥 ${parsed.attendees}\n` : ''}\n${calLink}`
     )
+    return
+  }
+
+  // 若有待補充的服務項目，直接把輸入存成備註
+  const pendingNoteId = await consumePendingNote(lineUserId)
+  if (pendingNoteId) {
+    await addContactNote(pendingNoteId, `服務項目：${t}`)
+    await replyMessage(replyToken, `✅ 已補充服務項目：${t}`)
     return
   }
 

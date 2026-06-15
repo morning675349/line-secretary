@@ -111,6 +111,20 @@ export async function consumePendingSource(lineUserId: string): Promise<string |
   return contactId
 }
 
+// 暫存「等待補充服務項目」
+export async function setPendingNote(lineUserId: string, contactId: string): Promise<void> {
+  await db.collection('users').doc(lineUserId).set({ pendingNote: contactId }, { merge: true })
+}
+
+export async function consumePendingNote(lineUserId: string): Promise<string | null> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  const contactId = doc.data()?.pendingNote || null
+  if (contactId) {
+    await db.collection('users').doc(lineUserId).update({ pendingNote: FieldValue.delete() })
+  }
+  return contactId
+}
+
 // 取得最近一筆聯絡人（場合輸入時的 fallback）
 export async function getLatestContact(lineUserId: string): Promise<Contact | null> {
   const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
