@@ -1,5 +1,5 @@
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+export const maxDuration = 300
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
@@ -56,31 +56,31 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   }
 }
 
-// ── 名片掃描（批次）────────────────────────────────────────
+// ── 名片掃描（批次，依序處理）──────────────────────────────
 async function handleBatchImages(events: { messageId: string; replyToken: string }[], lineUserId: string) {
-  // 先回覆第一張，讓用戶知道在處理
   if (events[0].replyToken) {
-    await replyMessage(events[0].replyToken, `📷 收到 ${events.length} 張名片，批次分析中...`)
+    await replyMessage(events[0].replyToken, `📷 收到 ${events.length} 張名片，依序分析中（請稍候）...`)
   }
 
   type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string }
+  const successful: ScanResult[] = []
+  let failedCount = 0
 
-  const results = await Promise.allSettled(
-    events.map(async ({ messageId }): Promise<ScanResult> => {
+  // 依序處理，避免同時呼叫 OpenAI 影響辨識品質
+  for (const { messageId } of events) {
+    try {
       const imageBuffer = await downloadLineImage(messageId)
       const card = await analyzeCard(imageBuffer)
       const contactId = await saveContact(lineUserId, card)
       uploadCardImage(imageBuffer, contactId)
         .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
         .catch(err => console.error('Card image upload failed:', err))
-      return { card, contactId }
-    })
-  )
-
-  const successful = results
-    .filter((r): r is PromiseFulfilledResult<ScanResult> => r.status === 'fulfilled')
-    .map(r => r.value)
-  const failedCount = results.filter(r => r.status === 'rejected').length
+      successful.push({ card, contactId })
+    } catch (err) {
+      console.error('Card scan failed:', err)
+      failedCount++
+    }
+  }
 
   const lines = [
     `✅ 批次掃描完成！共 ${successful.length} 張名片`,
