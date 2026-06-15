@@ -30,7 +30,7 @@ function verifySignature(body: string, signature: string): boolean {
   return hash === signature
 }
 
-// ── 名片掃描 ────────────────────────────────────────────────
+// ── 名片掃描（單張）────────────────────────────────────────
 async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
   await replyMessage(replyToken, '📷 收到名片，分析中...')
 
@@ -40,10 +40,8 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   const followUpDate = new Date()
   followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
 
-  // 先存聯絡人取得 ID，再上傳圖片（需要 ID 作為檔名）
   const contactId = await saveContact(lineUserId, card)
 
-  // 背景上傳，失敗不影響主流程
   uploadCardImage(imageBuffer, contactId)
     .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
     .catch(err => console.error('Card image upload failed:', err))
@@ -56,6 +54,48 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
     const name = card.nameZh || card.nameEn || '這位聯絡人'
     await pushMessage(lineUserId, `🤔 ${name} 的名片沒有服務項目資訊\n你知道他們主要做什麼嗎？直接回覆我，我幫你存進去。`)
   }
+}
+
+// ── 名片掃描（批次）────────────────────────────────────────
+async function handleBatchImages(events: { messageId: string; replyToken: string }[], lineUserId: string) {
+  // 先回覆第一張，讓用戶知道在處理
+  if (events[0].replyToken) {
+    await replyMessage(events[0].replyToken, `📷 收到 ${events.length} 張名片，批次分析中...`)
+  }
+
+  type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string }
+
+  const results = await Promise.allSettled(
+    events.map(async ({ messageId }): Promise<ScanResult> => {
+      const imageBuffer = await downloadLineImage(messageId)
+      const card = await analyzeCard(imageBuffer)
+      const contactId = await saveContact(lineUserId, card)
+      uploadCardImage(imageBuffer, contactId)
+        .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
+        .catch(err => console.error('Card image upload failed:', err))
+      return { card, contactId }
+    })
+  )
+
+  const successful = results
+    .filter((r): r is PromiseFulfilledResult<ScanResult> => r.status === 'fulfilled')
+    .map(r => r.value)
+  const failedCount = results.filter(r => r.status === 'rejected').length
+
+  const lines = [
+    `✅ 批次掃描完成！共 ${successful.length} 張名片`,
+    ...(failedCount > 0 ? [`⚠️ ${failedCount} 張分析失敗`] : []),
+    '',
+    ...successful.map(({ card }, i) => {
+      const name = card.nameZh || card.nameEn || '未知'
+      const company = card.company ? `（${card.company}）` : ''
+      return `${i + 1}. ${name}${company} ⭐${card.score}/10 ${card.category}`
+    }),
+    '',
+    '📌 場合資訊與服務項目可至後台補充',
+  ]
+
+  await pushMessage(lineUserId, lines.join('\n'))
 }
 
 // ── Postback 處理 ────────────────────────────────────────────
@@ -384,19 +424,41 @@ export async function POST(req: NextRequest) {
   }
 
   const data = JSON.parse(body)
+  const events: any[] = data.events || []
 
-  for (const event of data.events || []) {
+  // 批次名片偵測：同一用戶、同一 webhook call 傳多張圖
+  const imageEvents = events.filter(e => e.type === 'message' && e.message?.type === 'image')
+  const otherEvents = events.filter(e => !(e.type === 'message' && e.message?.type === 'image'))
+
+  if (imageEvents.length > 1) {
+    const lineUserId = imageEvents[0].source?.userId
+    try {
+      await handleBatchImages(
+        imageEvents.map((e: any) => ({ messageId: e.message.id, replyToken: e.replyToken })),
+        lineUserId
+      )
+    } catch (err) {
+      console.error('Batch image error:', err)
+      await pushMessage(lineUserId, '⚠️ 批次掃描發生錯誤，請稍後再試')
+    }
+  } else if (imageEvents.length === 1) {
+    const e = imageEvents[0]
+    const lineUserId = e.source?.userId
+    try {
+      await handleImageMessage(e.message.id, e.replyToken, lineUserId)
+    } catch (err) {
+      console.error('Image handling error:', err)
+      if (e.replyToken) await replyMessage(e.replyToken, '⚠️ 發生錯誤，請稍後再試')
+    }
+  }
+
+  for (const event of otherEvents) {
     const lineUserId = event.source?.userId
     const replyToken = event.replyToken
 
     try {
-      if (event.type === 'message') {
-        const { message } = event
-        if (message.type === 'image') {
-          await handleImageMessage(message.id, replyToken, lineUserId)
-        } else if (message.type === 'text') {
-          await handleTextMessage(message.text, replyToken, lineUserId)
-        }
+      if (event.type === 'message' && event.message?.type === 'text') {
+        await handleTextMessage(event.message.text, replyToken, lineUserId)
       } else if (event.type === 'postback') {
         await handlePostback(event.postback.data, replyToken, lineUserId)
       }
