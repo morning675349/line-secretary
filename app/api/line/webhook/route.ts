@@ -165,6 +165,12 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
     return
   }
 
+  // 圖文選單按鈕：掃名片（文字觸發）
+  if (t === '掃名片') {
+    await replyMessage(replyToken, '📷 請直接傳送名片照片，我會自動分析並儲存聯絡人資料。')
+    return
+  }
+
   // 統計
   if (t === '統計' || t === '人脈統計' || t === 'stats') {
     const stats = await getContactStats(lineUserId)
@@ -188,7 +194,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
   }
 
   // 查詢跟進
-  if (t === '跟進' || t === '待跟進' || t === '提醒') {
+  if (t === '跟進' || t === '跟進提醒' || t === '待跟進' || t === '提醒') {
     const contacts = await getPendingFollowUps(lineUserId)
     if (contacts.length === 0) {
       await replyMessage(replyToken, '✅ 目前沒有逾期的跟進任務！')
@@ -203,6 +209,12 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
       lines.push('')
     })
     await replyMessage(replyToken, lines.join('\n'))
+    return
+  }
+
+  // 圖文選單按鈕：搜尋聯絡人（文字觸發，引導輸入）
+  if (t === '搜尋聯絡人') {
+    await replyMessage(replyToken, '🔍 請輸入要搜尋的姓名或公司：\n\n例如：找 王大明\n例如：找 奇策')
     return
   }
 
@@ -238,7 +250,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
     return
   }
 
-  if (t === '排程' || t === '行程') {
+  if (t === '排程' || t === '行程' || t === '新增行程') {
     const connected = await isCalendarConnected(lineUserId)
     if (!connected) {
       const authUrl = getAuthUrl(lineUserId)
