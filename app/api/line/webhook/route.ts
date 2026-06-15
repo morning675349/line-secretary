@@ -3,9 +3,21 @@ export const maxDuration = 60
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
-import { downloadLineImage, replyMessage, pushMessage, pushSourceQuickReply, pushAnalysisWithCorrect } from '@/lib/line-client'
+import OpenAI from 'openai'
+import {
+  downloadLineImage, replyMessage, pushMessage,
+  pushSourceQuickReply, pushAnalysisWithCorrect,
+} from '@/lib/line-client'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
-import { saveContact, getPendingFollowUps, searchContacts, updateContactSource, updateContactField } from '@/lib/contact-service'
+import {
+  saveContact, getPendingFollowUps, searchContacts,
+  updateContactStatus, updateContactSource, updateContactField,
+  addContactNote, findContactByName, getContactStats,
+} from '@/lib/contact-service'
+import { parseSchedule } from '@/lib/schedule-parser'
+import { createCalendarEvent, getAuthUrl, isCalendarConnected } from '@/lib/google-calendar'
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 function verifySignature(body: string, signature: string): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET || ''
@@ -13,6 +25,7 @@ function verifySignature(body: string, signature: string): boolean {
   return hash === signature
 }
 
+// ── 名片掃描 ────────────────────────────────────────────────
 async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
   await replyMessage(replyToken, '📷 收到名片，分析中...')
 
@@ -28,8 +41,8 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   await pushSourceQuickReply(lineUserId, contactId)
 }
 
+// ── Postback 處理 ────────────────────────────────────────────
 async function handlePostback(data: string, replyToken: string) {
-  // src:BNI:contactId 或 src:轉型創新協會:contactId
   const fixedMatch = data.match(/^src:(.+):(\w+)$/)
   if (fixedMatch) {
     const [, source, contactId] = fixedMatch
@@ -37,31 +50,14 @@ async function handlePostback(data: string, replyToken: string) {
     await replyMessage(replyToken, `✅ 已記錄：${source}`)
     return
   }
-
-  // src_other:contactId → 等待使用者輸入自訂場合
-  const otherMatch = data.match(/^src_other:(\w+)$/)
-  if (otherMatch) {
-    // fillInText 會讓使用者輸入，輸入的文字會以 "場合名稱：xxx contactId" 格式送回
-    // 這裡先不做任何事，由 handleTextMessage 的 custom source 段落處理
-    return
-  }
+  // src_other → 等用戶輸入，由 handleTextMessage 處理
 }
 
+// ── 文字指令 ────────────────────────────────────────────────
 async function handleTextMessage(text: string, replyToken: string, lineUserId: string) {
   const t = text.trim()
 
-  // 自訂場合輸入：「場合名稱：台中商業午餐」（最後一個空格前為場合，後為contactId）
-  const customSourceMatch = t.match(/^場合名稱：(.+)$/)
-  if (customSourceMatch) {
-    const parts = customSourceMatch[1].trim().split(' ')
-    const contactId = parts[parts.length - 1]
-    const source = parts.slice(0, -1).join(' ') || parts[0]
-    await updateContactSource(contactId, source.trim())
-    await replyMessage(replyToken, `✅ 已記錄場合：${source.trim()}`)
-    return
-  }
-
-  // 修正名字：「修正名字：周致傑」（postback 帶 contactId 回來會在 fillInText 預填）
+  // 修正名字：「修正名字：周致傑contactId」
   const correctNameMatch = t.match(/^修正名字：(.+)$/)
   if (correctNameMatch) {
     const parts = correctNameMatch[1].trim().split(' ')
@@ -72,7 +68,7 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     return
   }
 
-  // 修正公司：「修正公司：藝銘實業有限公司」
+  // 修正公司
   const correctCompanyMatch = t.match(/^修正公司：(.+)$/)
   if (correctCompanyMatch) {
     const parts = correctCompanyMatch[1].trim().split(' ')
@@ -83,7 +79,115 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     return
   }
 
-  // 查詢跟進提醒
+  // 自訂場合：「場合名稱：BNI台中南區 contactId」
+  const customSourceMatch = t.match(/^場合名稱：(.+)$/)
+  if (customSourceMatch) {
+    const parts = customSourceMatch[1].trim().split(' ')
+    const contactId = parts[parts.length - 1]
+    const source = parts.slice(0, -1).join(' ') || parts[0]
+    await updateContactSource(contactId, source.trim())
+    await replyMessage(replyToken, `✅ 已記錄場合：${source.trim()}`)
+    return
+  }
+
+  // 狀態更新：「已聯絡 王大明」「已提案 藝銘」「成交 周總」
+  const statusMap: Record<string, string> = {
+    '已聯絡': '已聯絡', '聯絡了': '已聯絡',
+    '已提案': '已提案', '提案了': '已提案',
+    '成交': '成交', '已成交': '成交',
+    '已引薦': '引薦完成', '引薦完成': '引薦完成',
+  }
+  const statusMatch = t.match(/^(已聯絡|聯絡了|已提案|提案了|成交|已成交|已引薦|引薦完成)\s+(.+)$/)
+  if (statusMatch) {
+    const [, statusKey, name] = statusMatch
+    const status = statusMap[statusKey] as '已聯絡' | '已提案' | '成交' | '引薦完成'
+    const contact = await findContactByName(lineUserId, name)
+    if (!contact || !contact.id) {
+      await replyMessage(replyToken, `找不到「${name}」，請試試「找 ${name}」確認姓名`)
+      return
+    }
+    await updateContactStatus(contact.id, status)
+    const displayName = contact.nameZh || contact.nameEn || name
+    await replyMessage(replyToken, `✅ ${displayName}（${contact.company}）\n狀態已更新為：${status}`)
+    return
+  }
+
+  // 會議筆記：「筆記 王大明 今天聊了網站需求，有興趣3個月後開始」
+  const noteMatch = t.match(/^筆記\s+(\S+)\s+(.+)$/)
+  if (noteMatch) {
+    const [, name, noteContent] = noteMatch
+    const contact = await findContactByName(lineUserId, name)
+    if (!contact || !contact.id) {
+      await replyMessage(replyToken, `找不到「${name}」，請先確認姓名`)
+      return
+    }
+    await addContactNote(contact.id, noteContent)
+    const displayName = contact.nameZh || contact.nameEn || name
+    await replyMessage(replyToken, `✅ 筆記已儲存\n👤 ${displayName}（${contact.company}）\n📝 ${noteContent}`)
+    return
+  }
+
+  // 起草訊息：「幫我寫跟進信給王大明」「起草 周致傑」
+  const draftMatch = t.match(/^(幫我寫|起草|draft)\s*.*?給?\s*(.+)$/)
+  if (draftMatch) {
+    const name = draftMatch[2].trim()
+    const contact = await findContactByName(lineUserId, name)
+    if (!contact) {
+      await replyMessage(replyToken, `找不到「${name}」的資料，請先掃名片`)
+      return
+    }
+    await replyMessage(replyToken, '✍️ 草稿生成中...')
+    const displayName = contact.nameZh || contact.nameEn || name
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `你是一位整合行銷顧問的助理，幫主管起草中文跟進訊息。
+主管背景：網站規劃顧問 + SEO顧問，服務中小企業主。
+語氣：自然、專業、有溫度，不要官腔。訊息要短（100字內）。`,
+        },
+        {
+          role: 'user',
+          content: `幫我寫一則 LINE/WhatsApp 跟進訊息給：
+姓名：${displayName}
+公司：${contact.company}
+職稱：${contact.title}
+分類：${contact.category}
+跟進建議：${contact.followUpSuggestion}
+${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
+        },
+      ],
+      max_tokens: 300,
+    })
+    const draft = response.choices[0].message.content || ''
+    await pushMessage(lineUserId, `✍️ 跟進訊息草稿：\n\n${draft}\n\n（可直接複製發送或修改後使用）`)
+    return
+  }
+
+  // 統計
+  if (t === '統計' || t === '人脈統計' || t === 'stats') {
+    const stats = await getContactStats(lineUserId)
+    const lines = [
+      '📊 人脈庫統計',
+      `總聯絡人：${stats.total} 人`,
+      `本週新增：${stats.thisWeekNew} 人`,
+      `DobBiz 潛力：${stats.dobBizCount} 人`,
+      '',
+      '📌 分類：',
+      ...Object.entries(stats.byCategory).map(([k, v]) => `  ${k}：${v} 人`),
+      '',
+      '🏭 產業：',
+      ...Object.entries(stats.byIndustry).slice(0, 5).map(([k, v]) => `  ${k}：${v} 人`),
+      '',
+      '⏳ 跟進狀態：',
+      ...Object.entries(stats.byStatus).map(([k, v]) => `  ${k}：${v} 人`),
+    ]
+    await replyMessage(replyToken, lines.join('\n'))
+    return
+  }
+
+  // 查詢跟進
   if (t === '跟進' || t === '待跟進' || t === '提醒') {
     const contacts = await getPendingFollowUps(lineUserId)
     if (contacts.length === 0) {
@@ -111,7 +215,7 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
       return
     }
     const lines = [`🔍 搜尋「${query}」結果：`, '']
-    contacts.slice(0, 5).forEach(c => {
+    contacts.forEach(c => {
       const name = c.nameZh || c.nameEn || '未知'
       lines.push(`👤 ${name} · ${c.company}`)
       lines.push(`   ${c.title} · ${c.mobile || c.officePhone || c.email}`)
@@ -122,13 +226,67 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     return
   }
 
+  // 行程管理
+  if (t === '連結行事曆' || t === '串行事曆' || t === 'connect calendar') {
+    const connected = await isCalendarConnected(lineUserId)
+    if (connected) {
+      await replyMessage(replyToken, '✅ Google Calendar 已連結！\n\n直接說「排程 下週三下午3點跟林董在台中開會」就可以建立行程。')
+    } else {
+      const authUrl = getAuthUrl(lineUserId)
+      await replyMessage(replyToken, `請點以下連結授權 Google Calendar：\n\n${authUrl}`)
+    }
+    return
+  }
+
+  if (t.startsWith('排程 ') || t.startsWith('行程 ') || t.startsWith('約 ')) {
+    const scheduleText = t.replace(/^(排程|行程|約)\s+/, '')
+    const connected = await isCalendarConnected(lineUserId)
+    if (!connected) {
+      const authUrl = getAuthUrl(lineUserId)
+      await replyMessage(replyToken, `需要先連結 Google Calendar：\n\n${authUrl}`)
+      return
+    }
+    await replyMessage(replyToken, '📅 解析行程中...')
+    const parsed = await parseSchedule(scheduleText)
+    if (!parsed.valid) {
+      await pushMessage(lineUserId, `⚠️ 無法解析行程：${parsed.errorMessage}\n\n請試試：「排程 下週三下午3點跟林董在台中開會」`)
+      return
+    }
+    const start = new Date(parsed.startDateTime)
+    const end = new Date(parsed.endDateTime)
+    const calLink = await createCalendarEvent(lineUserId, parsed.title, start, end, parsed.location)
+    const timeStr = start.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    await pushMessage(
+      lineUserId,
+      `✅ 行程已建立！\n\n📅 ${parsed.title}\n🕐 ${timeStr}\n${parsed.location ? `📍 ${parsed.location}\n` : ''}${parsed.attendees ? `👥 ${parsed.attendees}\n` : ''}\n${calLink}`
+    )
+    return
+  }
+
   // 說明選單
   await replyMessage(
     replyToken,
-    '📌 隨身秘書指令：\n\n📷 傳名片照片 → 自動分析＋儲存\n「跟進」→ 查看需要跟進的人\n「找 公司名」→ 搜尋聯絡人'
+    `📌 隨身秘書指令：
+
+📷 傳名片照片 → 自動分析＋儲存
+
+📋 跟進管理：
+「跟進」→ 查看待跟進
+「已聯絡 王大明」→ 更新狀態
+「找 公司名」→ 搜尋聯絡人
+「統計」→ 人脈庫統計
+
+📝 筆記與起草：
+「筆記 王大明 聊了網站需求」
+「幫我寫跟進信給王大明」
+
+📅 行程管理：
+「連結行事曆」→ 串接 Google Calendar
+「排程 下週三下午3點跟林董開會」`
   )
 }
 
+// ── 主入口 ────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   const body = await req.text()
   const signature = req.headers.get('x-line-signature') || ''
