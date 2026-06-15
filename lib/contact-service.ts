@@ -6,7 +6,7 @@ export interface Contact extends CardData {
   id?: string
   lineUserId: string
   status: '待跟進' | '已聯絡' | '已提案' | '成交' | '引薦完成'
-  source: 'BNI' | '展覽活動' | '客戶介紹' | '社群' | '其他'
+  source: string
   notes: string[]
   followUpAt: Timestamp
   createdAt: Timestamp
@@ -53,7 +53,7 @@ export async function updateContactStatus(
 
 export async function updateContactSource(
   contactId: string,
-  source: Contact['source']
+  source: string
 ): Promise<void> {
   await db.collection('contacts').doc(contactId).update({ source })
 }

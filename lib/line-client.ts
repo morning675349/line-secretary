@@ -44,3 +44,54 @@ export async function pushMessage(userId: string, text: string): Promise<void> {
     }),
   })
 }
+
+export async function pushSourceQuickReply(userId: string, contactId: string): Promise<void> {
+  await fetch(`${LINE_API}/message/push`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [
+        {
+          type: 'text',
+          text: '📍 這張名片是在哪裡拿到的？',
+          quickReply: {
+            items: [
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
+                  label: 'BNI',
+                  data: `src:BNI:${contactId}`,
+                  displayText: 'BNI',
+                },
+              },
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
+                  label: '轉型創新協會',
+                  data: `src:轉型創新協會:${contactId}`,
+                  displayText: '轉型創新協會',
+                },
+              },
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
+                  label: '其他場合',
+                  data: `src_other:${contactId}`,
+                  inputOption: 'openKeyboard',
+                  fillInText: '場合名稱：',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+  })
+}
