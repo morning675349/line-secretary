@@ -111,6 +111,20 @@ export async function consumePendingSource(lineUserId: string): Promise<string |
   return contactId
 }
 
+// 暫存「等待修正名字/公司」
+export async function setPendingCorrection(lineUserId: string, field: 'nameZh' | 'nameEn' | 'company' | 'companyEn', contactId: string): Promise<void> {
+  await db.collection('users').doc(lineUserId).set({ pendingCorrection: { field, contactId } }, { merge: true })
+}
+
+export async function consumePendingCorrection(lineUserId: string): Promise<{ field: 'nameZh' | 'nameEn' | 'company' | 'companyEn'; contactId: string } | null> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  const data = doc.data()?.pendingCorrection || null
+  if (data) {
+    await db.collection('users').doc(lineUserId).update({ pendingCorrection: FieldValue.delete() })
+  }
+  return data
+}
+
 // 暫存「等待補充服務項目」
 export async function setPendingNote(lineUserId: string, contactId: string): Promise<void> {
   await db.collection('users').doc(lineUserId).set({ pendingNote: contactId }, { merge: true })

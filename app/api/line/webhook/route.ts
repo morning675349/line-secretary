@@ -15,6 +15,7 @@ import {
   addContactNote, findContactByName, getContactStats,
   setPendingSource, consumePendingSource, getLatestContact,
   setPendingNote, consumePendingNote,
+  setPendingCorrection, consumePendingCorrection,
 } from '@/lib/contact-service'
 import { parseSchedule } from '@/lib/schedule-parser'
 import { createCalendarEvent, getAuthUrl, isCalendarConnected } from '@/lib/google-calendar'
@@ -65,6 +66,22 @@ async function handlePostback(data: string, replyToken: string, lineUserId: stri
   if (otherMatch) {
     await setPendingSource(lineUserId, otherMatch[1])
     await replyMessage(replyToken, '請直接輸入場合名稱，例如：\nBNI台中南區')
+    return
+  }
+
+  // 修正名字
+  const correctNameMatch = data.match(/^correct_name:(\w+)$/)
+  if (correctNameMatch) {
+    await setPendingCorrection(lineUserId, 'nameZh', correctNameMatch[1])
+    await replyMessage(replyToken, '請輸入正確的名字：')
+    return
+  }
+
+  // 修正公司
+  const correctCompanyMatch = data.match(/^correct_company:(\w+)$/)
+  if (correctCompanyMatch) {
+    await setPendingCorrection(lineUserId, 'company', correctCompanyMatch[1])
+    await replyMessage(replyToken, '請輸入正確的公司名稱：')
     return
   }
 }
@@ -306,6 +323,15 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
       lineUserId,
       `✅ 行程已建立！\n\n📅 ${parsed.title}\n🕐 ${timeStr}\n${parsed.location ? `📍 ${parsed.location}\n` : ''}${parsed.attendees ? `👥 ${parsed.attendees}\n` : ''}\n${calLink}`
     )
+    return
+  }
+
+  // 若有待修正的欄位，直接更新
+  const pendingCorr = await consumePendingCorrection(lineUserId)
+  if (pendingCorr) {
+    await updateContactField(pendingCorr.contactId, pendingCorr.field, t)
+    const label = pendingCorr.field === 'nameZh' ? '名字' : '公司名稱'
+    await replyMessage(replyToken, `✅ 已修正${label}為：${t}`)
     return
   }
 
