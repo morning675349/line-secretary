@@ -27,13 +27,21 @@ export interface CardData {
   reasoning: string
 }
 
-const SYSTEM_PROMPT = `你是一個商業名片 OCR 與分析助手。
+const SYSTEM_PROMPT = `你是一個商業名片 OCR 與 CRM 分析助手。你的任務是：
+1. 精確辨識名片上的所有文字
+2. 將資訊解析成結構化 JSON
+3. 根據顧問背景對這位聯絡人做 CRM 評估
 
-⚠️ 人名辨識最重要，請特別注意：
-- 仔細觀察筆畫細節，不要因字形相似就猜測（例如：傑/焰/燁/煜/燦、銘/鉞/銓/鎧、振/展/傳）
-- 如果名字不確定，寧可標記「(待確認)」也不要猜錯
-- 參考英文名或拼音（如果有）來交叉驗證中文名
-- 公司名稱同樣要逐字確認，不要合理推測
+━━━ OCR 辨識規則（最重要） ━━━
+名字辨識：
+- 必須逐筆畫確認，相似字絕不猜測，例如：傑/焰/燁/煜/燦、銘/鉞/銓/鎧、振/展/傳/博、俊/俐、郁/鬱
+- 有英文名或拼音時，用來交叉驗證中文名（例：Jie → 傑，Ming → 銘）
+- 若無法確認某個字，在該字後加 (?)，如「王?明」
+電話辨識：
+- 台灣手機：09 開頭，10 碼，格式 09xx-xxxxxx
+- 市話：區碼(02/03/04/06/07/08) + 7-8 碼
+- 完整抄寫，不要省略任何數字
+- 看到多組電話，全部記錄到對應欄位（手機→mobile，市話→officePhone）
 
 關於這位顧問的背景：
 - 主要服務：網站規劃（客製化）+ SEO顧問
@@ -89,13 +97,13 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 
 未識別的欄位填空字串或空陣列。`
 
-// Pass 1：純 OCR，只提取文字，不做任何推斷
-async function extractRawText(imageBuffer: Buffer): Promise<string> {
+export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
   const base64 = imageBuffer.toString('base64')
 
   const response = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: [
@@ -105,43 +113,13 @@ async function extractRawText(imageBuffer: Buffer): Promise<string> {
           },
           {
             type: 'text',
-            text: `請精確辨識這張名片上的所有文字，逐行列出，保持原始格式。
-
-重要規則：
-1. 看不清楚的字用【?】標記，絕對不要猜測
-2. 中文字要逐筆確認，筆畫相似的字（傑/焰/燁/煜、銘/鉞/銓/鎧、振/展/傳/博）寧可標【?】也不要猜
-3. 如果名片有英文拼音，用來交叉驗證中文名
-4. 電話號碼完整列出，不要省略
-5. 只輸出名片上看到的內容，不要增加任何推測`,
+            text: '請仔細辨識名片上所有資訊，回傳完整 JSON。所有欄位都必須填寫，沒有資訊的欄位填空字串或空陣列。',
           },
         ],
       },
     ],
-    max_tokens: 600,
-  })
-
-  return response.choices[0].message.content || ''
-}
-
-// Pass 2：純文字分析，把 OCR 結果解析成結構化 JSON
-export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
-  const rawText = await extractRawText(imageBuffer)
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: `以下是從名片辨識出的原始文字（【?】代表不確定的字）：
-
-${rawText}
-
-請根據以上文字解析成完整 JSON。若欄位中有【?】，在該欄位後加上 (待確認) 提示。`,
-      },
-    ],
     response_format: { type: 'json_object' },
-    max_tokens: 1000,
+    max_tokens: 1200,
   })
 
   const raw = response.choices[0].message.content || '{}'
