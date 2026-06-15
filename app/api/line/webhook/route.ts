@@ -9,6 +9,8 @@ import {
   pushSourceQuickReply, pushAnalysisWithCorrect,
 } from '@/lib/line-client'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
+import { uploadCardImage } from '@/lib/storage'
+import { db } from '@/lib/firebase-admin'
 import {
   saveContact, getPendingFollowUps, searchContacts,
   updateContactStatus, updateContactSource, updateContactField,
@@ -38,7 +40,13 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   const followUpDate = new Date()
   followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
 
+  // 先存聯絡人取得 ID，再上傳圖片（需要 ID 作為檔名）
   const contactId = await saveContact(lineUserId, card)
+
+  // 背景上傳，失敗不影響主流程
+  uploadCardImage(imageBuffer, contactId)
+    .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
+    .catch(err => console.error('Card image upload failed:', err))
 
   await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
   await pushSourceQuickReply(lineUserId, contactId)

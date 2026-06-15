@@ -10,9 +10,10 @@ export interface Contact extends CardData {
   notes: string[]
   followUpAt: Timestamp
   createdAt: Timestamp
+  cardImageUrl?: string
 }
 
-export async function saveContact(lineUserId: string, card: CardData): Promise<string> {
+export async function saveContact(lineUserId: string, card: CardData, cardImageUrl?: string): Promise<string> {
   const followUpAt = new Date()
   followUpAt.setDate(followUpAt.getDate() + card.followUpDays)
 
@@ -24,6 +25,7 @@ export async function saveContact(lineUserId: string, card: CardData): Promise<s
     notes: [],
     followUpAt: Timestamp.fromDate(followUpAt),
     createdAt: Timestamp.now(),
+    ...(cardImageUrl ? { cardImageUrl } : {}),
   }
 
   const ref = await db.collection('contacts').add(contact)

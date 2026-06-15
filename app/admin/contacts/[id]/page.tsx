@@ -91,6 +91,12 @@ export default function ContactDetailPage() {
           style={{ background: 'none', border: 'none', color: '#9ba3c2', fontSize: 20, cursor: 'pointer', lineHeight: 1 }}>←</button>
         <span style={{ fontSize: 16, fontWeight: 600 }}>{contact.nameZh || contact.nameEn || '聯絡人詳情'}</span>
         <span style={{ color: '#666', fontSize: 13 }}>{contact.company}</span>
+        {contact.cardImageUrl && (
+          <a href={contact.cardImageUrl} target="_blank" rel="noopener noreferrer"
+            style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#3498db', textDecoration: 'none' }}>
+            🪪 查看名片
+          </a>
+        )}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <button onClick={handleSave} disabled={saving}
             style={{ background: saved ? '#1a6b3e' : '#27ae60', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 20px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
@@ -190,6 +196,20 @@ export default function ContactDetailPage() {
               </Field>
             )}
           </div>
+
+          {/* 名片圖片 */}
+          {contact.cardImageUrl && (
+            <div style={{ background: '#1a1f2e', borderRadius: 12, padding: 20 }}>
+              <h3 style={{ color: '#9ba3c2', fontSize: 12, fontWeight: 500, marginBottom: 12, letterSpacing: 1 }}>名片原圖</h3>
+              <a href={contact.cardImageUrl} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={contact.cardImageUrl}
+                  alt="名片"
+                  style={{ width: '100%', borderRadius: 8, border: '1px solid #2a3050', cursor: 'zoom-in', display: 'block' }}
+                />
+              </a>
+            </div>
+          )}
 
           {/* 備註 */}
           <div style={{ background: '#1a1f2e', borderRadius: 12, padding: 20 }}>
