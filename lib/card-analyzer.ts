@@ -1,5 +1,4 @@
 import OpenAI from 'openai'
-import sharp from 'sharp'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -92,14 +91,7 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 
 // Pass 1：純 OCR，只提取文字，不做任何推斷
 async function extractRawText(imageBuffer: Buffer): Promise<string> {
-  // 預處理：銳化 + 正規化對比，幫助模型看清楚細節
-  const processed = await sharp(imageBuffer)
-    .sharpen({ sigma: 1.2 })
-    .normalise()
-    .jpeg({ quality: 95 })
-    .toBuffer()
-
-  const base64 = processed.toString('base64')
+  const base64 = imageBuffer.toString('base64')
 
   const response = await openai.chat.completions.create({
     model: 'gpt-4o',
