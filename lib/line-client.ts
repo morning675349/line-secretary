@@ -45,6 +45,49 @@ export async function pushMessage(userId: string, text: string): Promise<void> {
   })
 }
 
+export async function pushAnalysisWithCorrect(userId: string, text: string, contactId: string): Promise<void> {
+  await fetch(`${LINE_API}/message/push`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [
+        {
+          type: 'text',
+          text,
+          quickReply: {
+            items: [
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
+                  label: '✏️ 修正名字',
+                  data: `correct_name:${contactId}`,
+                  inputOption: 'openKeyboard',
+                  fillInText: '修正名字：',
+                },
+              },
+              {
+                type: 'action',
+                action: {
+                  type: 'postback',
+                  label: '✏️ 修正公司',
+                  data: `correct_company:${contactId}`,
+                  inputOption: 'openKeyboard',
+                  fillInText: '修正公司：',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+  })
+}
+
 export async function pushSourceQuickReply(userId: string, contactId: string): Promise<void> {
   await fetch(`${LINE_API}/message/push`, {
     method: 'POST',

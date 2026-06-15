@@ -51,11 +51,16 @@ export async function updateContactStatus(
   await db.collection('contacts').doc(contactId).update({ status })
 }
 
-export async function updateContactSource(
-  contactId: string,
-  source: string
-): Promise<void> {
+export async function updateContactSource(contactId: string, source: string): Promise<void> {
   await db.collection('contacts').doc(contactId).update({ source })
+}
+
+export async function updateContactField(
+  contactId: string,
+  field: 'nameZh' | 'nameEn' | 'company' | 'companyEn',
+  value: string
+): Promise<void> {
+  await db.collection('contacts').doc(contactId).update({ [field]: value })
 }
 
 export async function searchContacts(lineUserId: string, query: string): Promise<Contact[]> {

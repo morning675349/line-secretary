@@ -3,9 +3,9 @@ export const maxDuration = 60
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
-import { downloadLineImage, replyMessage, pushMessage, pushSourceQuickReply } from '@/lib/line-client'
+import { downloadLineImage, replyMessage, pushMessage, pushSourceQuickReply, pushAnalysisWithCorrect } from '@/lib/line-client'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
-import { saveContact, getPendingFollowUps, searchContacts, updateContactSource } from '@/lib/contact-service'
+import { saveContact, getPendingFollowUps, searchContacts, updateContactSource, updateContactField } from '@/lib/contact-service'
 
 function verifySignature(body: string, signature: string): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET || ''
@@ -24,7 +24,7 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
 
   const contactId = await saveContact(lineUserId, card)
 
-  await pushMessage(lineUserId, formatCardReply(card, followUpDate))
+  await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
   await pushSourceQuickReply(lineUserId, contactId)
 }
 
@@ -50,12 +50,36 @@ async function handlePostback(data: string, replyToken: string) {
 async function handleTextMessage(text: string, replyToken: string, lineUserId: string) {
   const t = text.trim()
 
-  // 自訂場合輸入：「場合名稱：台中商業午餐 contactId」
-  const customSourceMatch = t.match(/^場合名稱：(.+)\s+(\w+)$/)
+  // 自訂場合輸入：「場合名稱：台中商業午餐」（最後一個空格前為場合，後為contactId）
+  const customSourceMatch = t.match(/^場合名稱：(.+)$/)
   if (customSourceMatch) {
-    const [, source, contactId] = customSourceMatch
+    const parts = customSourceMatch[1].trim().split(' ')
+    const contactId = parts[parts.length - 1]
+    const source = parts.slice(0, -1).join(' ') || parts[0]
     await updateContactSource(contactId, source.trim())
-    await replyMessage(replyToken, `✅ 已記錄：${source.trim()}`)
+    await replyMessage(replyToken, `✅ 已記錄場合：${source.trim()}`)
+    return
+  }
+
+  // 修正名字：「修正名字：周致傑」（postback 帶 contactId 回來會在 fillInText 預填）
+  const correctNameMatch = t.match(/^修正名字：(.+)$/)
+  if (correctNameMatch) {
+    const parts = correctNameMatch[1].trim().split(' ')
+    const contactId = parts[parts.length - 1]
+    const newName = parts.slice(0, -1).join(' ') || parts[0]
+    await updateContactField(contactId, 'nameZh', newName.trim())
+    await replyMessage(replyToken, `✅ 名字已修正為：${newName.trim()}`)
+    return
+  }
+
+  // 修正公司：「修正公司：藝銘實業有限公司」
+  const correctCompanyMatch = t.match(/^修正公司：(.+)$/)
+  if (correctCompanyMatch) {
+    const parts = correctCompanyMatch[1].trim().split(' ')
+    const contactId = parts[parts.length - 1]
+    const newCompany = parts.slice(0, -1).join(' ') || parts[0]
+    await updateContactField(contactId, 'company', newCompany.trim())
+    await replyMessage(replyToken, `✅ 公司已修正為：${newCompany.trim()}`)
     return
   }
 
