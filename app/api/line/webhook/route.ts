@@ -3,9 +3,10 @@ export const maxDuration = 60
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
+import type { Contact } from '@/lib/contact-service'
 import { downloadLineImage, replyMessage } from '@/lib/line-client'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
-import { saveContact, getPendingFollowUps, searchContacts } from '@/lib/contact-service'
+import { saveContact, getPendingFollowUps, searchContacts, updateContactSource } from '@/lib/contact-service'
 
 function verifySignature(body: string, signature: string): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET || ''
@@ -26,10 +27,11 @@ async function handleImageMessage(
   const followUpDate = new Date()
   followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
 
-  await saveContact(lineUserId, card)
+  const contactId = await saveContact(lineUserId, card)
 
   const reply = formatCardReply(card, followUpDate)
-  // 使用 push 因為 replyToken 已用於第一則
+  const sourcePrompt = `\n📍 在哪裡認識的？\n回覆：BNI、展覽活動、客戶介紹、社群、其他\n（格式：來源 ${contactId}）`
+
   await fetch('https://api.line.me/v2/bot/message/push', {
     method: 'POST',
     headers: {
@@ -38,7 +40,7 @@ async function handleImageMessage(
     },
     body: JSON.stringify({
       to: lineUserId,
-      messages: [{ type: 'text', text: reply }],
+      messages: [{ type: 'text', text: reply + sourcePrompt }],
     }),
   })
 }
@@ -86,6 +88,15 @@ async function handleTextMessage(
       lines.push('')
     })
     await replyMessage(replyToken, lines.join('\n'))
+    return
+  }
+
+  // 記錄認識場合：「BNI abc123」
+  const sourceMatch = t.match(/^(BNI|展覽活動|客戶介紹|社群|其他)\s+(\S+)$/)
+  if (sourceMatch) {
+    const [, source, contactId] = sourceMatch
+    await updateContactSource(contactId, source as Contact['source'])
+    await replyMessage(replyToken, `✅ 已記錄：透過「${source}」認識`)
     return
   }
 

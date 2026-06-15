@@ -6,7 +6,7 @@ export interface Contact extends CardData {
   id?: string
   lineUserId: string
   status: '待跟進' | '已聯絡' | '已提案' | '成交' | '引薦完成'
-  metAt?: string
+  source: 'BNI' | '展覽活動' | '客戶介紹' | '社群' | '其他'
   notes: string[]
   followUpAt: Timestamp
   createdAt: Timestamp
@@ -20,6 +20,7 @@ export async function saveContact(lineUserId: string, card: CardData): Promise<s
     ...card,
     lineUserId,
     status: '待跟進',
+    source: '其他',
     notes: [],
     followUpAt: Timestamp.fromDate(followUpAt),
     createdAt: Timestamp.now(),
@@ -48,6 +49,13 @@ export async function updateContactStatus(
   status: Contact['status']
 ): Promise<void> {
   await db.collection('contacts').doc(contactId).update({ status })
+}
+
+export async function updateContactSource(
+  contactId: string,
+  source: Contact['source']
+): Promise<void> {
+  await db.collection('contacts').doc(contactId).update({ source })
 }
 
 export async function searchContacts(lineUserId: string, query: string): Promise<Contact[]> {

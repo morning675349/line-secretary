@@ -16,6 +16,8 @@ export interface CardData {
   address: string
   website: string
   services: string[]
+  industry: '製造業' | '貿易商' | '服務業' | '科技' | '設計創意' | '金融法律' | '建築營造' | '餐飲零售' | '其他'
+  companySize: '微型' | '小型' | '中型' | '大型' | '不明'
   score: number
   category: '潛在客戶' | 'BNI夥伴' | 'DobBiz用戶' | '引薦來源' | '待觀察'
   isDobBizPotential: boolean
@@ -71,6 +73,8 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 - services：名片上列出的服務項目或產品（陣列，沒有則空陣列）
 - score：評分 1-10
 - category：主分類
+- industry：產業分類，從以下選一個：製造業、貿易商、服務業、科技、設計創意、金融法律、建築營造、餐飲零售、其他
+- companySize：公司規模推估（微型<10人、小型10-50人、中型50-200人、大型200人以上、不明）
 - isDobBizPotential：是否為 DobBiz 潛力用戶（布林值）
 - dobBizNote：DobBiz 切入建議（isDobBizPotential 為 false 時填空字串）
 - followUpDays：跟進天數
