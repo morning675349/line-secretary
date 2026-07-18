@@ -1,15 +1,20 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
-import { saveTokens } from '@/lib/google-calendar'
+import { saveTokens, consumeOAuthState } from '@/lib/google-calendar'
 import { pushMessage } from '@/lib/line-client'
 
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get('code')
-  const lineUserId = req.nextUrl.searchParams.get('state')
+  const state = req.nextUrl.searchParams.get('state')
 
-  if (!code || !lineUserId) {
+  if (!code || !state) {
     return new NextResponse('授權失敗，缺少必要參數', { status: 400 })
+  }
+
+  const lineUserId = await consumeOAuthState(state)
+  if (!lineUserId) {
+    return new NextResponse('授權連結已失效或過期，請回到 LINE 重新產生連結', { status: 400 })
   }
 
   try {

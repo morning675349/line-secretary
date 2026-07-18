@@ -26,8 +26,15 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 function verifySignature(body: string, signature: string): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET || ''
-  const hash = crypto.createHmac('sha256', secret).update(body).digest('base64')
-  return hash === signature
+  const hash = crypto.createHmac('sha256', secret).update(body).digest()
+  let sigBuf: Buffer
+  try {
+    sigBuf = Buffer.from(signature, 'base64')
+  } catch {
+    return false
+  }
+  if (sigBuf.length !== hash.length) return false
+  return crypto.timingSafeEqual(hash, sigBuf)
 }
 
 // ── 名片掃描（單張）────────────────────────────────────────
@@ -104,7 +111,11 @@ async function handlePostback(data: string, replyToken: string, lineUserId: stri
   const srcMatch = data.match(/^src:(.+):(\w+)$/)
   if (srcMatch) {
     const [, source, contactId] = srcMatch
-    await updateContactSource(contactId, source)
+    const ok = await updateContactSource(lineUserId, contactId, source)
+    if (!ok) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
     await replyMessage(replyToken, `✅ 已記錄場合：${source}`)
     return
   }
@@ -144,7 +155,11 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     const parts = correctNameMatch[1].trim().split(' ')
     const contactId = parts[parts.length - 1]
     const newName = parts.slice(0, -1).join(' ') || parts[0]
-    await updateContactField(contactId, 'nameZh', newName.trim())
+    const ok = await updateContactField(lineUserId, contactId, 'nameZh', newName.trim())
+    if (!ok) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
     await replyMessage(replyToken, `✅ 名字已修正為：${newName.trim()}`)
     return
   }
@@ -155,7 +170,11 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
     const parts = correctCompanyMatch[1].trim().split(' ')
     const contactId = parts[parts.length - 1]
     const newCompany = parts.slice(0, -1).join(' ') || parts[0]
-    await updateContactField(contactId, 'company', newCompany.trim())
+    const ok = await updateContactField(lineUserId, contactId, 'company', newCompany.trim())
+    if (!ok) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
     await replyMessage(replyToken, `✅ 公司已修正為：${newCompany.trim()}`)
     return
   }
@@ -173,7 +192,11 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
       await replyMessage(replyToken, '⚠️ 找不到對應名片，請先掃描名片')
       return
     }
-    await updateContactSource(contactId, sourceName)
+    const ok = await updateContactSource(lineUserId, contactId, sourceName)
+    if (!ok) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
     await replyMessage(replyToken, `✅ 已記錄場合：${sourceName}`)
     return
   }
@@ -194,7 +217,7 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
       await replyMessage(replyToken, `找不到「${name}」，請試試「找 ${name}」確認姓名`)
       return
     }
-    await updateContactStatus(contact.id, status)
+    await updateContactStatus(lineUserId, contact.id, status)
     const displayName = contact.nameZh || contact.nameEn || name
     await replyMessage(replyToken, `✅ ${displayName}（${contact.company}）\n狀態已更新為：${status}`)
     return
@@ -209,7 +232,7 @@ async function handleTextMessage(text: string, replyToken: string, lineUserId: s
       await replyMessage(replyToken, `找不到「${name}」，請先確認姓名`)
       return
     }
-    await addContactNote(contact.id, noteContent)
+    await addContactNote(lineUserId, contact.id, noteContent)
     const displayName = contact.nameZh || contact.nameEn || name
     await replyMessage(replyToken, `✅ 筆記已儲存\n👤 ${displayName}（${contact.company}）\n📝 ${noteContent}`)
     return
@@ -332,7 +355,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
     if (connected) {
       await replyMessage(replyToken, '✅ Google Calendar 已連結！\n\n直接說「排程 下週三下午3點跟林董在台中開會」就可以建立行程。')
     } else {
-      const authUrl = getAuthUrl(lineUserId)
+      const authUrl = await getAuthUrl(lineUserId)
       await replyMessage(replyToken, `請點以下連結授權 Google Calendar：\n\n${authUrl}`)
     }
     return
@@ -341,7 +364,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
   if (t === '排程' || t === '行程' || t === '新增行程') {
     const connected = await isCalendarConnected(lineUserId)
     if (!connected) {
-      const authUrl = getAuthUrl(lineUserId)
+      const authUrl = await getAuthUrl(lineUserId)
       await replyMessage(replyToken, `需要先連結 Google Calendar：\n\n${authUrl}`)
     } else {
       await replyMessage(replyToken, '請輸入行程詳情，例如：\n\n排程 下週三下午3點跟林董在台中開會')
@@ -353,7 +376,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
     const scheduleText = t.replace(/^(排程|行程|約)\s+/, '')
     const connected = await isCalendarConnected(lineUserId)
     if (!connected) {
-      const authUrl = getAuthUrl(lineUserId)
+      const authUrl = await getAuthUrl(lineUserId)
       await replyMessage(replyToken, `需要先連結 Google Calendar：\n\n${authUrl}`)
       return
     }
@@ -377,7 +400,11 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
   // 若有待修正的欄位，直接更新
   const pendingCorr = await consumePendingCorrection(lineUserId)
   if (pendingCorr) {
-    await updateContactField(pendingCorr.contactId, pendingCorr.field, t)
+    const ok = await updateContactField(lineUserId, pendingCorr.contactId, pendingCorr.field, t)
+    if (!ok) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
     const label = pendingCorr.field === 'nameZh' ? '名字' : '公司名稱'
     await replyMessage(replyToken, `✅ 已修正${label}為：${t}`)
     return
@@ -386,7 +413,7 @@ ${contact.notes?.length ? `備註：${contact.notes.slice(-1)[0]}` : ''}`,
   // 若有待補充的服務項目，直接把輸入存成備註
   const pendingNoteId = await consumePendingNote(lineUserId)
   if (pendingNoteId) {
-    await addContactNote(pendingNoteId, `服務項目：${t}`)
+    await addContactNote(lineUserId, pendingNoteId, `服務項目：${t}`)
     await replyMessage(replyToken, `✅ 已補充服務項目：${t}`)
     return
   }

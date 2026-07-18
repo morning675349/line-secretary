@@ -3,8 +3,6 @@ const LINE_DATA_API = 'https://api-data.line.me/v2/bot'
 
 export async function downloadLineImage(messageId: string): Promise<Buffer> {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN
-  console.log('LINE token prefix:', token?.slice(0, 20))
-  console.log('Downloading image messageId:', messageId)
 
   const res = await fetch(`${LINE_DATA_API}/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${token}` },

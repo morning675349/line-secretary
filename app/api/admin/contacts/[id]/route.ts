@@ -2,13 +2,14 @@ export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/firebase-admin'
 import { FieldValue } from 'firebase-admin/firestore'
+import { verifySessionToken } from '@/lib/admin-session'
 
-function checkAuth(req: NextRequest) {
-  return req.cookies.get('admin_token')?.value === process.env.ADMIN_PASSWORD
+async function checkAuth(req: NextRequest) {
+  return verifySessionToken(req.cookies.get('admin_token')?.value)
 }
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await checkAuth(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { id } = await params
   const doc = await db.collection('contacts').doc(id).get()
   if (!doc.exists) return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await checkAuth(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { id } = await params
   const body = await req.json()
 
@@ -47,14 +48,14 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await checkAuth(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { id } = await params
   await db.collection('contacts').doc(id).delete()
   return NextResponse.json({ ok: true })
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await checkAuth(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const { id } = await params
   const { note } = await req.json()
   const ts = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })

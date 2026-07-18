@@ -46,27 +46,44 @@ export async function getPendingFollowUps(lineUserId: string): Promise<Contact[]
     .slice(0, 5)
 }
 
-export async function updateContactStatus(contactId: string, status: Contact['status']): Promise<void> {
-  await db.collection('contacts').doc(contactId).update({ status })
+// 驗證 contactId 確實屬於這個 LINE 使用者，避免任何人透過猜測/取得 contactId
+// 就能修改別人的聯絡人資料（IDOR）。所有由使用者輸入（文字指令/postback）
+// 直接帶入 contactId 的寫入動作，都必須先通過這層檢查。
+async function assertOwnership(lineUserId: string, contactId: string): Promise<boolean> {
+  const doc = await db.collection('contacts').doc(contactId).get()
+  return doc.exists && doc.data()?.lineUserId === lineUserId
 }
 
-export async function updateContactSource(contactId: string, source: string): Promise<void> {
+export async function updateContactStatus(lineUserId: string, contactId: string, status: Contact['status']): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
+  await db.collection('contacts').doc(contactId).update({ status })
+  return true
+}
+
+export async function updateContactSource(lineUserId: string, contactId: string, source: string): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
   await db.collection('contacts').doc(contactId).update({ source })
+  return true
 }
 
 export async function updateContactField(
+  lineUserId: string,
   contactId: string,
   field: 'nameZh' | 'nameEn' | 'company' | 'companyEn',
   value: string
-): Promise<void> {
+): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
   await db.collection('contacts').doc(contactId).update({ [field]: value })
+  return true
 }
 
-export async function addContactNote(contactId: string, note: string): Promise<void> {
+export async function addContactNote(lineUserId: string, contactId: string, note: string): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
   const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })
   await db.collection('contacts').doc(contactId).update({
     notes: FieldValue.arrayUnion(`[${timestamp}] ${note}`),
   })
+  return true
 }
 
 // 搜尋聯絡人（支援模糊匹配姓名/公司）
