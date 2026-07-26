@@ -20,6 +20,14 @@ import { runAgent } from '@/lib/agent'
 import { transcribeAudio } from '@/lib/transcribe'
 import { appendSystemNote } from '@/lib/conversation'
 
+// 使用者白名單：agent 每句話都有 API 成本，單人系統不開放陌生人使用。
+// ALLOWED_LINE_USER_IDS 未設定時放行所有人（向下相容），設定後（逗號分隔）僅白名單可用。
+function isAllowedUser(lineUserId: string | undefined): boolean {
+  const allow = (process.env.ALLOWED_LINE_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+  if (allow.length === 0) return true
+  return !!lineUserId && allow.includes(lineUserId)
+}
+
 function verifySignature(body: string, signature: string): boolean {
   const secret = process.env.LINE_CHANNEL_SECRET || ''
   const hash = crypto.createHmac('sha256', secret).update(body).digest()
@@ -221,7 +229,12 @@ export async function POST(req: NextRequest) {
   }
 
   const data = JSON.parse(body)
-  const events: any[] = data.events || []
+  const allEvents: any[] = data.events || []
+  const events = allEvents.filter(e => {
+    if (isAllowedUser(e.source?.userId)) return true
+    console.warn('Blocked non-allowlisted user:', e.source?.userId)
+    return false
+  })
 
   // 批次名片偵測：同一用戶、同一 webhook call 傳多張圖
   const imageEvents = events.filter(e => e.type === 'message' && e.message?.type === 'image')
