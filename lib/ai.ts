@@ -1,6 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 
-// Claude API 客戶端（Phase 1 升級：agent 大腦與名片 OCR 都走 Claude）
-export const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+// AI 客戶端（Phase 1 升級：agent 大腦與名片 OCR 共用）
+export const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
-export const AGENT_MODEL = 'claude-opus-4-8'
+// 帳號可用的最新正式版模型。要升級只改這一行，agent 與名片辨識會一起套用。
+export const AGENT_MODEL = 'gpt-5.5'

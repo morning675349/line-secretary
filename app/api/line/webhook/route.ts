@@ -276,8 +276,8 @@ export async function POST(req: NextRequest) {
       }
     } catch (err) {
       console.error('Event handling error:', err)
-      const msg = !process.env.ANTHROPIC_API_KEY
-        ? '⚠️ AI 引擎尚未設定（缺少 ANTHROPIC_API_KEY），請先到 Vercel 環境變數補上'
+      const msg = !process.env.OPENAI_API_KEY
+        ? '⚠️ AI 引擎尚未設定（缺少 OPENAI_API_KEY），請先到 Vercel 環境變數補上'
         : '⚠️ 發生錯誤，請稍後再試'
       if (replyToken) {
         try { await replyMessage(replyToken, msg) } catch { await pushMessage(lineUserId, msg) }

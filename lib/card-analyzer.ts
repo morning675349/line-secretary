@@ -1,4 +1,4 @@
-import { anthropic, AGENT_MODEL } from './ai'
+import { openai, AGENT_MODEL } from './ai'
 
 export interface CardData {
   nameZh: string
@@ -147,18 +147,16 @@ const CARD_SCHEMA = {
 export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
   const base64 = imageBuffer.toString('base64')
 
-  const response = await anthropic.messages.create({
+  const response = await openai.chat.completions.create({
     model: AGENT_MODEL,
-    max_tokens: 3000,
-    thinking: { type: 'adaptive' },
-    system: SYSTEM_PROMPT,
     messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: [
           {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
+            type: 'image_url',
+            image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' },
           },
           {
             type: 'text',
@@ -167,12 +165,15 @@ export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
         ],
       },
     ],
-    output_config: { format: { type: 'json_schema', schema: CARD_SCHEMA } },
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'business_card', strict: true, schema: CARD_SCHEMA },
+    },
   })
 
-  const textBlock = response.content.find(b => b.type === 'text')
-  if (!textBlock || textBlock.type !== 'text') throw new Error('Card analysis returned no text content')
-  return JSON.parse(textBlock.text) as CardData
+  const raw = response.choices[0].message.content
+  if (!raw) throw new Error('Card analysis returned no content')
+  return JSON.parse(raw) as CardData
 }
 
 export function formatCardReply(card: CardData, followUpDate: Date): string {

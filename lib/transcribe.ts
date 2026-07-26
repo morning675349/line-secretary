@@ -1,9 +1,7 @@
-import OpenAI, { toFile } from 'openai'
+import { toFile } from 'openai'
+import { openai } from './ai'
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-
-// LINE 語音訊息（m4a/AAC）轉文字。語音轉文字仍走 OpenAI Whisper（Claude 沒有 STT），
-// 這是本專案唯一保留 OpenAI 的用途。
+// LINE 語音訊息（m4a/AAC）轉文字。
 export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   const file = await toFile(audioBuffer, 'voice.m4a', { type: 'audio/m4a' })
   const result = await openai.audio.transcriptions.create({

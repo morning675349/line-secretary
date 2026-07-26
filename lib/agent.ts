@@ -1,5 +1,5 @@
-import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema'
-import { anthropic, AGENT_MODEL } from './ai'
+import type OpenAI from 'openai'
+import { openai, AGENT_MODEL } from './ai'
 import { getHistory, appendExchange } from './conversation'
 import {
   searchContacts, findContactByName, getPendingFollowUps,
@@ -37,146 +37,210 @@ function contactFull(c: Contact): string {
   ].filter(Boolean).join('\n')
 }
 
-// ── Agent 工具（每次請求依 lineUserId 建立，確保資料隔離） ────
-function buildTools(lineUserId: string) {
-  const searchTool = betaTool({
-    name: 'search_contacts',
-    description: '在人脈庫搜尋聯絡人。支援姓名、公司、職稱、產業、分類的模糊搜尋，回傳最多 5 筆摘要。',
-    inputSchema: {
-      type: 'object',
-      properties: { query: { type: 'string', description: '搜尋關鍵字（姓名或公司等）' } },
-      required: ['query'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ query }) => {
+// ── 工具定義（送給模型看的 schema）───────────────────────────
+const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'search_contacts',
+      description: '在人脈庫搜尋聯絡人。支援姓名、公司、職稱、產業、分類的模糊搜尋，回傳最多 5 筆摘要。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: '搜尋關鍵字（姓名或公司等）' } },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_contact_details',
+      description: '取得單一聯絡人的完整資料，包含所有歷史筆記、跟進建議、DobBiz 標記。要起草跟進訊息或回答某個人的細節時先呼叫這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: '姓名或公司名（模糊匹配，取最相關一筆）' } },
+        required: ['name'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_latest_contact',
+      description: '取得最近一次掃描名片建立的聯絡人。使用者說「剛剛那張名片」「這個人」時用這個。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_pending_followups',
+      description: '列出目前已到期、需要跟進的聯絡人（最多 5 筆）。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_contact_status',
+      description: '更新聯絡人的跟進狀態。使用者說「我聯絡過王大明了」「跟林董成交了」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '姓名或公司名' },
+          status: { type: 'string', enum: ['待跟進', '已聯絡', '已提案', '成交', '引薦完成'] },
+        },
+        required: ['name', 'status'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_contact_note',
+      description: '幫聯絡人新增一則筆記（會議內容、聊到的需求、個人資訊等）。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '姓名或公司名' },
+          note: { type: 'string', description: '筆記內容' },
+        },
+        required: ['name', 'note'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'correct_contact_field',
+      description: '修正聯絡人的姓名或公司名稱（名片辨識錯誤時使用）。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '目前記錄的姓名或公司名（用來找到這筆資料）' },
+          field: { type: 'string', enum: ['nameZh', 'nameEn', 'company', 'companyEn'] },
+          value: { type: 'string', description: '正確的值' },
+        },
+        required: ['name', 'field', 'value'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_contact_stats',
+      description: '取得人脈庫統計：總人數、本週新增、分類分佈、產業分佈、跟進狀態分佈、DobBiz 潛力數。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_calendar_events',
+      description: '查詢 Google 日曆某段時間的行程。使用者問「今天/明天/下週三有什麼行程」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          start_iso: { type: 'string', description: '起始時間，ISO 8601 含 +08:00，例如 2026-07-27T00:00:00+08:00' },
+          end_iso: { type: 'string', description: '結束時間，ISO 8601 含 +08:00' },
+        },
+        required: ['start_iso', 'end_iso'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_calendar_event',
+      description: '在 Google 日曆建立行程。從使用者的自然語言解析出標題與時間後呼叫。時間沒講明結束就預設 1 小時。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '行程標題，簡短，例如「與林董會議」' },
+          start_iso: { type: 'string', description: '開始時間，ISO 8601 含 +08:00' },
+          end_iso: { type: 'string', description: '結束時間，ISO 8601 含 +08:00' },
+          location: { type: 'string', description: '地點，沒有則空字串' },
+        },
+        required: ['title', 'start_iso', 'end_iso', 'location'],
+        additionalProperties: false,
+      },
+    },
+  },
+]
+
+// ── 工具實作（綁定 lineUserId，確保只能存取自己的資料）──────
+type ToolArgs = Record<string, string>
+
+function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Promise<string>> {
+  return {
+    async search_contacts({ query }) {
       const results = await searchContacts(lineUserId, query)
       if (results.length === 0) return `找不到「${query}」相關的聯絡人。`
       return results.map(c => contactBrief(c)).join('\n---\n')
     },
-  })
 
-  const detailTool = betaTool({
-    name: 'get_contact_details',
-    description: '取得單一聯絡人的完整資料，包含所有歷史筆記、跟進建議、DobBiz 標記。要起草跟進訊息或回答某個人的細節時先呼叫這個。',
-    inputSchema: {
-      type: 'object',
-      properties: { name: { type: 'string', description: '姓名或公司名（模糊匹配，取最相關一筆）' } },
-      required: ['name'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ name }) => {
+    async get_contact_details({ name }) {
       const c = await findContactByName(lineUserId, name)
       if (!c) return `找不到「${name}」。可以先用 search_contacts 確認正確姓名。`
       return contactFull(c)
     },
-  })
 
-  const latestTool = betaTool({
-    name: 'get_latest_contact',
-    description: '取得最近一次掃描名片建立的聯絡人。使用者說「剛剛那張名片」「這個人」時用這個。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } as const,
-    run: async () => {
+    async get_latest_contact() {
       const c = await getLatestContact(lineUserId)
       if (!c) return '目前人脈庫還沒有任何聯絡人。'
       return contactFull(c)
     },
-  })
 
-  const followUpTool = betaTool({
-    name: 'list_pending_followups',
-    description: '列出目前已到期、需要跟進的聯絡人（最多 5 筆）。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } as const,
-    run: async () => {
+    async list_pending_followups() {
       const contacts = await getPendingFollowUps(lineUserId)
       if (contacts.length === 0) return '目前沒有逾期的跟進任務。'
-      return contacts.map(c => `${c.nameZh || c.nameEn}（${c.company}）⭐${c.score} ${c.category}｜建議：${c.followUpSuggestion}`).join('\n')
+      return contacts
+        .map(c => `${c.nameZh || c.nameEn}（${c.company}）⭐${c.score} ${c.category}｜建議：${c.followUpSuggestion}`)
+        .join('\n')
     },
-  })
 
-  const statusTool = betaTool({
-    name: 'update_contact_status',
-    description: '更新聯絡人的跟進狀態。使用者說「我聯絡過王大明了」「跟林董成交了」時用這個。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: '姓名或公司名' },
-        status: { type: 'string', enum: ['待跟進', '已聯絡', '已提案', '成交', '引薦完成'] },
-      },
-      required: ['name', 'status'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ name, status }) => {
+    async update_contact_status({ name, status }) {
       const c = await findContactByName(lineUserId, name)
       if (!c || !c.id) return `找不到「${name}」，無法更新狀態。`
       await updateContactStatus(lineUserId, c.id, status as Contact['status'])
       return `已將 ${c.nameZh || c.nameEn}（${c.company}）狀態更新為：${status}`
     },
-  })
 
-  const noteTool = betaTool({
-    name: 'add_contact_note',
-    description: '幫聯絡人新增一則筆記（會議內容、聊到的需求、個人資訊等）。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: '姓名或公司名' },
-        note: { type: 'string', description: '筆記內容' },
-      },
-      required: ['name', 'note'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ name, note }) => {
+    async add_contact_note({ name, note }) {
       const c = await findContactByName(lineUserId, name)
       if (!c || !c.id) return `找不到「${name}」，無法加筆記。`
       await addContactNote(lineUserId, c.id, note)
       return `已為 ${c.nameZh || c.nameEn}（${c.company}）儲存筆記。`
     },
-  })
 
-  const fieldTool = betaTool({
-    name: 'correct_contact_field',
-    description: '修正聯絡人的姓名或公司名稱（名片辨識錯誤時使用）。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: '目前記錄的姓名或公司名（用來找到這筆資料）' },
-        field: { type: 'string', enum: ['nameZh', 'nameEn', 'company', 'companyEn'] },
-        value: { type: 'string', description: '正確的值' },
-      },
-      required: ['name', 'field', 'value'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ name, field, value }) => {
+    async correct_contact_field({ name, field, value }) {
       const c = await findContactByName(lineUserId, name)
       if (!c || !c.id) return `找不到「${name}」。`
       await updateContactField(lineUserId, c.id, field as 'nameZh' | 'nameEn' | 'company' | 'companyEn', value)
       return `已將 ${field} 修正為：${value}`
     },
-  })
 
-  const statsTool = betaTool({
-    name: 'get_contact_stats',
-    description: '取得人脈庫統計：總人數、本週新增、分類分佈、產業分佈、跟進狀態分佈、DobBiz 潛力數。',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } as const,
-    run: async () => {
-      const s = await getContactStats(lineUserId)
-      return JSON.stringify(s)
+    async get_contact_stats() {
+      return JSON.stringify(await getContactStats(lineUserId))
     },
-  })
 
-  const calendarQueryTool = betaTool({
-    name: 'get_calendar_events',
-    description: '查詢 Google 日曆某段時間的行程。使用者問「今天/明天/下週三有什麼行程」時用這個。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        start_iso: { type: 'string', description: '起始時間，ISO 8601 含 +08:00，例如 2026-07-27T00:00:00+08:00' },
-        end_iso: { type: 'string', description: '結束時間，ISO 8601 含 +08:00' },
-      },
-      required: ['start_iso', 'end_iso'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ start_iso, end_iso }) => {
+    async get_calendar_events({ start_iso, end_iso }) {
       if (!(await isCalendarConnected(lineUserId))) {
         const url = await getAuthUrl(lineUserId)
         return `尚未連結 Google 日曆。請把這個授權連結原封不動傳給使用者：${url}`
@@ -185,37 +249,18 @@ function buildTools(lineUserId: string) {
       if (events.length === 0) return '這段時間沒有任何行程。'
       return events.map(e => `${e.date} ${e.time} ${e.title}${e.location ? ` @ ${e.location}` : ''}`).join('\n')
     },
-  })
 
-  const calendarCreateTool = betaTool({
-    name: 'create_calendar_event',
-    description: '在 Google 日曆建立行程。從使用者的自然語言解析出標題與時間後呼叫。時間沒講明結束就預設 1 小時。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: '行程標題，簡短，例如「與林董會議」' },
-        start_iso: { type: 'string', description: '開始時間，ISO 8601 含 +08:00' },
-        end_iso: { type: 'string', description: '結束時間，ISO 8601 含 +08:00' },
-        location: { type: 'string', description: '地點，沒有則空字串' },
-      },
-      required: ['title', 'start_iso', 'end_iso', 'location'],
-      additionalProperties: false,
-    } as const,
-    run: async ({ title, start_iso, end_iso, location }) => {
+    async create_calendar_event({ title, start_iso, end_iso, location }) {
       if (!(await isCalendarConnected(lineUserId))) {
         const url = await getAuthUrl(lineUserId)
         return `尚未連結 Google 日曆。請把這個授權連結原封不動傳給使用者：${url}`
       }
-      const link = await createCalendarEvent(lineUserId, title, new Date(start_iso), new Date(end_iso), location || undefined)
+      const link = await createCalendarEvent(
+        lineUserId, title, new Date(start_iso), new Date(end_iso), location || undefined
+      )
       return `行程已建立成功。日曆連結：${link}`
     },
-  })
-
-  return [
-    searchTool, detailTool, latestTool, followUpTool,
-    statusTool, noteTool, fieldTool, statsTool,
-    calendarQueryTool, calendarCreateTool,
-  ]
+  }
 }
 
 // ── 系統提示 ─────────────────────────────────────────────────
@@ -255,31 +300,56 @@ function systemPrompt(): string {
 - 回覆聚焦在使用者要的東西，不要重複多餘客套`
 }
 
-// ── 主入口 ───────────────────────────────────────────────────
+// ── 主入口：tool-calling 迴圈 ────────────────────────────────
+const MAX_ITERATIONS = 8
+
 export async function runAgent(lineUserId: string, userText: string): Promise<string> {
   const history = await getHistory(lineUserId)
+  const handlers = buildHandlers(lineUserId)
 
-  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
-    ...history.map(t => ({ role: t.role, content: t.content })),
-    { role: 'user' as const, content: userText },
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt() },
+    ...history.map(t => ({ role: t.role, content: t.content }) as OpenAI.Chat.Completions.ChatCompletionMessageParam),
+    { role: 'user', content: userText },
   ]
 
-  const finalMessage = await anthropic.beta.messages.toolRunner({
-    model: AGENT_MODEL,
-    max_tokens: 4096,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'medium' },
-    system: systemPrompt(),
-    tools: buildTools(lineUserId),
-    messages,
-    max_iterations: 8,
-  })
+  let answer = ''
 
-  const answer = finalMessage.content
-    .filter((b): b is Extract<typeof finalMessage.content[number], { type: 'text' }> => b.type === 'text')
-    .map(b => b.text)
-    .join('\n')
-    .trim() || '⚠️ 我沒有產生回覆，請再說一次。'
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const response = await openai.chat.completions.create({
+      model: AGENT_MODEL,
+      messages,
+      tools: TOOL_DEFS,
+    })
+
+    const message = response.choices[0].message
+    messages.push(message)
+
+    const toolCalls = (message.tool_calls || []).filter(tc => tc.type === 'function')
+    if (toolCalls.length === 0) {
+      answer = message.content?.trim() || ''
+      break
+    }
+
+    // 依序執行模型要求的工具，結果全部回填後再進下一輪
+    for (const call of toolCalls) {
+      const handler = handlers[call.function.name]
+      let result: string
+      if (!handler) {
+        result = `錯誤：沒有這個工具（${call.function.name}）。`
+      } else {
+        try {
+          result = await handler(JSON.parse(call.function.arguments || '{}'))
+        } catch (err) {
+          console.error(`Tool ${call.function.name} failed:`, err)
+          result = `工具執行失敗：${err instanceof Error ? err.message : '未知錯誤'}。請告訴使用者這個動作沒有成功。`
+        }
+      }
+      messages.push({ role: 'tool', tool_call_id: call.id, content: result })
+    }
+  }
+
+  if (!answer) answer = '⚠️ 這件事我處理太久了，可以說得更具體一點嗎？'
 
   await appendExchange(lineUserId, userText, answer)
   return answer
