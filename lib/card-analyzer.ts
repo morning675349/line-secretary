@@ -1,6 +1,4 @@
-import OpenAI from 'openai'
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+import { anthropic, AGENT_MODEL } from './ai'
 
 export interface CardData {
   nameZh: string
@@ -110,19 +108,57 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 
 未識別的欄位填空字串或空陣列。`
 
+// 名片 JSON 結構（structured outputs 用，保證回傳可解析）
+const CARD_SCHEMA = {
+  type: 'object',
+  properties: {
+    nameZh: { type: 'string' },
+    nameEn: { type: 'string' },
+    company: { type: 'string' },
+    companyEn: { type: 'string' },
+    title: { type: 'string' },
+    titleEn: { type: 'string' },
+    mobile: { type: 'string' },
+    officePhone: { type: 'string' },
+    fax: { type: 'string' },
+    email: { type: 'string' },
+    address: { type: 'string' },
+    website: { type: 'string' },
+    services: { type: 'array', items: { type: 'string' } },
+    industry: { type: 'string', enum: ['製造業', '貿易商', '服務業', '科技', '設計創意', '金融法律', '建築營造', '餐飲零售', '其他'] },
+    companySize: { type: 'string', enum: ['微型', '小型', '中型', '大型', '不明'] },
+    score: { type: 'integer' },
+    category: { type: 'string', enum: ['潛在客戶', 'BNI夥伴', 'DobBiz用戶', '引薦來源', '待觀察'] },
+    isDobBizPotential: { type: 'boolean' },
+    dobBizNote: { type: 'string' },
+    followUpDays: { type: 'integer' },
+    followUpSuggestion: { type: 'string' },
+    reasoning: { type: 'string' },
+  },
+  required: [
+    'nameZh', 'nameEn', 'company', 'companyEn', 'title', 'titleEn',
+    'mobile', 'officePhone', 'fax', 'email', 'address', 'website',
+    'services', 'industry', 'companySize', 'score', 'category',
+    'isDobBizPotential', 'dobBizNote', 'followUpDays', 'followUpSuggestion', 'reasoning',
+  ],
+  additionalProperties: false,
+} as const
+
 export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
   const base64 = imageBuffer.toString('base64')
 
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
+  const response = await anthropic.messages.create({
+    model: AGENT_MODEL,
+    max_tokens: 3000,
+    thinking: { type: 'adaptive' },
+    system: SYSTEM_PROMPT,
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: [
           {
-            type: 'image_url',
-            image_url: { url: `data:image/jpeg;base64,${base64}`, detail: 'high' },
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
           },
           {
             type: 'text',
@@ -131,12 +167,12 @@ export async function analyzeCard(imageBuffer: Buffer): Promise<CardData> {
         ],
       },
     ],
-    response_format: { type: 'json_object' },
-    max_tokens: 1200,
+    output_config: { format: { type: 'json_schema', schema: CARD_SCHEMA } },
   })
 
-  const raw = response.choices[0].message.content || '{}'
-  return JSON.parse(raw) as CardData
+  const textBlock = response.content.find(b => b.type === 'text')
+  if (!textBlock || textBlock.type !== 'text') throw new Error('Card analysis returned no text content')
+  return JSON.parse(textBlock.text) as CardData
 }
 
 export function formatCardReply(card: CardData, followUpDate: Date): string {

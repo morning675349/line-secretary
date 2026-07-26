@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>LINE 圖文選單產生器</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0d1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100vh;
+    padding: 32px 24px;
+    font-family: -apple-system, BlinkMacSystemFont, 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+  }
+  h1 { color: #ccc; font-size: 18px; font-weight: 500; margin-bottom: 20px; letter-spacing: 0.5px; }
+  canvas {
+    max-width: 100%;
+    height: auto;
+    border: 1px solid #222;
+    border-radius: 4px;
+    display: block;
+  }
+  .actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+    align-items: center;
+  }
+  button {
+    padding: 12px 28px;
+    background: #27AE60;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-family: inherit;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+  }
+  button:hover { background: #1e8449; }
+  p { color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>隨身秘書 圖文選單 · 2500 × 1686 px</h1>
+<canvas id="c" width="2500" height="1686"></canvas>
+<div class="actions">
+  <button onclick="download()">⬇ 下載 PNG</button>
+  <p>下載後上傳至 LINE OA Manager → 圖文選單</p>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const W = 2500, H = 1686;
+const COLS = 3, ROWS = 2;
+const GAP = 4;
+const cellW = Math.floor((W - GAP * (COLS - 1)) / COLS);
+const cellH = Math.floor((H - GAP * (ROWS - 1)) / ROWS);
+
+const FONT = "'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', 'Arial Unicode MS', sans-serif";
+
+const buttons = [
+  { label: '掃名片',    sub: '傳照片自動分析',    icon: '📷', bg: '#0B1E13', accent: '#27AE60' },
+  { label: '跟進提醒',  sub: '查看待跟進名單',    icon: '🔔', bg: '#231207', accent: '#E67E22' },
+  { label: '人脈統計',  sub: '人脈庫數據一覽',    icon: '📊', bg: '#071525', accent: '#3498DB' },
+  { label: '新增行程',  sub: '自然語言建行事曆',  icon: '📅', bg: '#120821', accent: '#9B59B6' },
+  { label: '搜尋聯絡人', sub: '找聯絡人資料',    icon: '🔍', bg: '#051A12', accent: '#1ABC9C' },
+  { label: '指令說明',  sub: '查看所有指令',      icon: '❓', bg: '#111111', accent: '#95A5A6' },
+];
+
+function draw() {
+  ctx.fillStyle = '#030508';
+  ctx.fillRect(0, 0, W, H);
+
+  buttons.forEach((btn, i) => {
+    const col = i % COLS;
+    const row = Math.floor(i / COLS);
+    const x = col * (cellW + GAP);
+    const y = row * (cellH + GAP);
+
+    ctx.fillStyle = btn.bg;
+    ctx.fillRect(x, y, cellW, cellH);
+
+    ctx.fillStyle = btn.accent;
+    ctx.fillRect(x, y, cellW, 10);
+
+    const cx = x + cellW / 2;
+
+    ctx.font = '195px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(btn.icon, cx, y + cellH * 0.38);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = `bold 90px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(btn.label, cx, y + cellH * 0.67);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.48)';
+    ctx.font = `52px ${FONT}`;
+    ctx.fillText(btn.sub, cx, y + cellH * 0.81);
+  });
+}
+
+draw();
+
+function download() {
+  canvas.toBlob(blob => {
+    const a = document.createElement('a');
+    a.download = 'line-richmenu.png';
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, 'image/png');
+}
+</script>
+</body>
+</html>

@@ -118,6 +118,35 @@ export async function getTodayEvents(lineUserId: string): Promise<Array<{ time: 
   }))
 }
 
+// 查詢任意時間範圍的行程（agent 工具用：「我下週三有什麼行程？」）
+export async function listEvents(
+  lineUserId: string,
+  timeMin: Date,
+  timeMax: Date
+): Promise<Array<{ date: string; time: string; title: string; location: string }>> {
+  const calendar = await getCalendarClient(lineUserId)
+  const res = await calendar.events.list({
+    calendarId: 'primary',
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    timeZone: 'Asia/Taipei',
+    singleEvents: true,
+    orderBy: 'startTime',
+    maxResults: 30,
+  })
+
+  return (res.data.items || []).map(e => ({
+    date: e.start?.dateTime
+      ? new Date(e.start.dateTime).toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric', weekday: 'short' })
+      : e.start?.date || '',
+    time: e.start?.dateTime
+      ? new Date(e.start.dateTime).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Taipei' })
+      : '全天',
+    title: e.summary || '(無標題)',
+    location: e.location || '',
+  }))
+}
+
 export async function isCalendarConnected(lineUserId: string): Promise<boolean> {
   const doc = await db.collection('users').doc(lineUserId).get()
   return !!doc.data()?.googleTokens
