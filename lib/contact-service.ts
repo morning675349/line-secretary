@@ -158,6 +158,37 @@ export async function consumePendingNote(lineUserId: string): Promise<string | n
   return contactId
 }
 
+// ── 場合回補 ────────────────────────────────────────────────
+// 舊名片的 source 多半停在預設的「其他」，可用建檔時間反查當天日曆補回去。
+
+export interface BackfillItem {
+  contactId: string
+  name: string
+  company: string
+  source: string
+}
+
+/** 找出場合還沒填實的聯絡人（預設值「其他」或空白） */
+export async function getContactsNeedingSource(lineUserId: string): Promise<Contact[]> {
+  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
+  return snap.docs
+    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+    .filter(c => !c.source || c.source === '其他')
+    .sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))
+}
+
+export async function setPendingBackfill(lineUserId: string, items: BackfillItem[]): Promise<void> {
+  await db.collection('users').doc(lineUserId).set({ pendingBackfill: items }, { merge: true })
+}
+
+export async function consumePendingBackfill(lineUserId: string): Promise<BackfillItem[] | null> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  const items = doc.data()?.pendingBackfill as BackfillItem[] | undefined
+  if (!items?.length) return null
+  await db.collection('users').doc(lineUserId).update({ pendingBackfill: FieldValue.delete() })
+  return items
+}
+
 // 取得最近一筆聯絡人（場合輸入時的 fallback）
 export async function getLatestContact(lineUserId: string): Promise<Contact | null> {
   const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()

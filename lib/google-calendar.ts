@@ -1,7 +1,11 @@
-import { google } from 'googleapis'
+import { google, calendar_v3 } from 'googleapis'
 import { randomBytes } from 'crypto'
 import { db } from './firebase-admin'
 import { Timestamp } from 'firebase-admin/firestore'
+import { pickBestEvent, taipeiDate, MatchedEvent } from './event-matching'
+
+export { pickBestEvent, taipeiDate }
+export type { MatchedEvent }
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000 // 10 分鐘
 
@@ -145,6 +149,47 @@ export async function listEvents(
     title: e.summary || '(無標題)',
     location: e.location || '',
   }))
+}
+
+// ── 場合自動偵測（判定邏輯在 lib/event-matching.ts）──────────
+
+export async function fetchRawEvents(
+  lineUserId: string,
+  timeMin: Date,
+  timeMax: Date
+): Promise<calendar_v3.Schema$Event[]> {
+  const calendar = await getCalendarClient(lineUserId)
+  const res = await calendar.events.list({
+    calendarId: 'primary',
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    timeZone: 'Asia/Taipei',
+    singleEvents: true,
+    orderBy: 'startTime',
+    maxResults: 30,
+  })
+  return (res.data.items || []).filter(e => e.status !== 'cancelled')
+}
+
+/** 查出某個時間點正在發生的活動（日曆未連結或出錯時回傳 null，不中斷主流程） */
+export async function findEventAround(lineUserId: string, at: Date): Promise<MatchedEvent | null> {
+  try {
+    const HOUR = 60 * 60 * 1000
+    const events = await fetchRawEvents(lineUserId, new Date(at.getTime() - 6 * HOUR), new Date(at.getTime() + 3 * HOUR))
+    return pickBestEvent(events, at)
+  } catch (err) {
+    console.error('findEventAround failed:', err)
+    return null
+  }
+}
+
+/** 回補用：取某一天（Taipei）的所有行程 */
+export async function fetchEventsOnDate(lineUserId: string, dateStr: string): Promise<calendar_v3.Schema$Event[]> {
+  return fetchRawEvents(
+    lineUserId,
+    new Date(`${dateStr}T00:00:00+08:00`),
+    new Date(`${dateStr}T23:59:59+08:00`)
+  )
 }
 
 export async function isCalendarConnected(lineUserId: string): Promise<boolean> {

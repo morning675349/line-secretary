@@ -4,10 +4,13 @@ import { getHistory, appendExchange } from './conversation'
 import {
   searchContacts, findContactByName, getPendingFollowUps,
   updateContactStatus, updateContactField, addContactNote,
-  getContactStats, getLatestContact, Contact,
+  getContactStats, getLatestContact, updateContactSource,
+  getContactsNeedingSource, setPendingBackfill, consumePendingBackfill,
+  Contact, BackfillItem,
 } from './contact-service'
 import {
   createCalendarEvent, listEvents, isCalendarConnected, getAuthUrl,
+  fetchEventsOnDate, pickBestEvent, taipeiDate,
 } from './google-calendar'
 
 // ── 工具回傳的聯絡人摘要 ─────────────────────────────────────
@@ -140,6 +143,41 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'update_contact_source',
+      description: '修改聯絡人的「認識場合」。使用者說「王大明是在五金展認識的」「場合記錯了，那張是在明志科大」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '姓名或公司名' },
+          source: { type: 'string', description: '正確的認識場合名稱' },
+        },
+        required: ['name', 'source'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'preview_source_backfill',
+      description: '掃描場合還是預設「其他」的舊聯絡人，用建檔時間反查當天日曆，推測他們是在哪個活動認識的。只產生提案不寫入，結果要先給使用者確認。使用者說「補場合」「把舊名片的場合補回去」時用這個。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'apply_source_backfill',
+      description: '把上一步 preview_source_backfill 的提案正式寫入資料庫。只有在使用者明確表示確認、要、好、寫入之後才可以呼叫。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_contact_stats',
       description: '取得人脈庫統計：總人數、本週新增、分類分佈、產業分佈、跟進狀態分佈、DobBiz 潛力數。',
       strict: true,
@@ -236,6 +274,91 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       return `已將 ${field} 修正為：${value}`
     },
 
+    async update_contact_source({ name, source }) {
+      const c = await findContactByName(lineUserId, name)
+      if (!c || !c.id) return `找不到「${name}」，無法修改場合。`
+      await updateContactSource(lineUserId, c.id, source)
+      return `已將 ${c.nameZh || c.nameEn}（${c.company}）的認識場合改為：${source}`
+    },
+
+    async preview_source_backfill() {
+      if (!(await isCalendarConnected(lineUserId))) {
+        const url = await getAuthUrl(lineUserId)
+        return `尚未連結 Google 日曆，無法反查。請把這個授權連結原封不動傳給使用者：${url}`
+      }
+
+      const candidates = await getContactsNeedingSource(lineUserId)
+      if (candidates.length === 0) return '所有聯絡人的場合都已經填好了，沒有需要回補的。'
+
+      // 依建檔日期分組，同一天只查一次日曆
+      const byDate = new Map<string, Contact[]>()
+      for (const c of candidates) {
+        if (!c.createdAt) continue
+        const key = taipeiDate(c.createdAt.toDate())
+        byDate.set(key, [...(byDate.get(key) || []), c])
+      }
+
+      const MAX_DATES = 20
+      const dates = [...byDate.keys()].sort().reverse()
+      const scanned = dates.slice(0, MAX_DATES)
+      const skippedDates = dates.length - scanned.length
+
+      const items: BackfillItem[] = []
+      let noEventCount = 0
+
+      for (const date of scanned) {
+        let events
+        try {
+          events = await fetchEventsOnDate(lineUserId, date)
+        } catch (err) {
+          console.error(`Backfill fetch failed for ${date}:`, err)
+          continue
+        }
+        for (const c of byDate.get(date)!) {
+          const ev = pickBestEvent(events, c.createdAt.toDate())
+          if (!ev || !c.id) { noEventCount++; continue }
+          items.push({
+            contactId: c.id,
+            name: c.nameZh || c.nameEn || '未知',
+            company: c.company || '',
+            source: ev.title,
+          })
+        }
+      }
+
+      if (items.length === 0) {
+        await setPendingBackfill(lineUserId, [])
+        return `檢查了 ${candidates.length} 位待補場合的聯絡人，但當天日曆上都找不到對應活動，沒有可以回補的資料。`
+      }
+
+      await setPendingBackfill(lineUserId, items)
+
+      const preview = items.map(i => `・${i.name}${i.company ? `（${i.company}）` : ''} → ${i.source}`).join('\n')
+      return [
+        `找到 ${items.length} 筆可以回補的場合（尚未寫入，等使用者確認）：`,
+        preview,
+        '',
+        `另有 ${noEventCount} 位當天日曆查無活動，維持原樣。`,
+        skippedDates > 0 ? `注意：待補資料橫跨 ${dates.length} 個日期，本次只掃描最近 ${MAX_DATES} 天，還有 ${skippedDates} 天沒掃到，可以再執行一次。` : '',
+        '',
+        '請把這份清單原樣列給使用者，並問他要不要寫入。使用者確認後才呼叫 apply_source_backfill。',
+      ].filter(Boolean).join('\n')
+    },
+
+    async apply_source_backfill() {
+      const items = await consumePendingBackfill(lineUserId)
+      if (!items) return '沒有待確認的回補提案，請先執行 preview_source_backfill。'
+
+      let applied = 0
+      for (const item of items) {
+        const ok = await updateContactSource(lineUserId, item.contactId, item.source)
+        if (!ok) continue
+        await addContactNote(lineUserId, item.contactId, `場合回補：在「${item.source}」認識（依建檔當天日曆推測）`)
+        applied++
+      }
+      return `已回補 ${applied} 筆聯絡人的認識場合。`
+    },
+
     async get_contact_stats() {
       return JSON.stringify(await getContactStats(lineUserId))
     },
@@ -281,7 +404,7 @@ function systemPrompt(): string {
 - 經營 DobBiz（B2B AI 採購媒合平台，連結製造商與採購商）
 
 你的職責：
-1. 人脈管理：搜尋聯絡人、更新跟進狀態、記筆記、修正名片辨識錯誤、回報統計
+1. 人脈管理：搜尋聯絡人、更新跟進狀態、記筆記、修正名片辨識錯誤、修改認識場合、回報統計
 2. 行程管理：查詢與建立 Google 日曆行程
 3. 起草訊息：撰寫 LINE/Email 跟進訊息（先用 get_contact_details 拿完整背景與筆記再寫，草稿要自然、專業、有溫度、不官腔，LINE 訊息 100 字內）
 
@@ -291,6 +414,8 @@ function systemPrompt(): string {
 - 一句話可能包含多個動作（例如「跟王大明聊完了，他想做官網，下週再約」= 更新狀態 + 記筆記），全部都要執行
 - 找不到聯絡人時，告訴使用者最接近的搜尋結果，不要瞎猜
 - 工具回傳「尚未連結 Google 日曆」時，把授權連結完整傳給使用者
+- 掃名片時系統會自動從日曆判定認識場合，使用者說場合記錯了就用 update_contact_source 改
+- 回補舊資料一定要兩步：先 preview_source_backfill 把清單給使用者看，等他明確說要，才 apply_source_backfill。絕不可以跳過確認直接寫入
 - 無法確定使用者意圖時，簡短問清楚，不要長篇大論
 
 回覆格式（LINE 純文字）：

@@ -5,8 +5,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import {
   downloadLineImage, replyMessage, pushMessage,
-  pushSourceQuickReply, pushAnalysisWithCorrect,
+  pushSourceQuickReply, pushSourceDetected, pushAnalysisWithCorrect,
 } from '@/lib/line-client'
+import { findEventAround, MatchedEvent } from '@/lib/google-calendar'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
 import { uploadCardImage } from '@/lib/storage'
 import { db } from '@/lib/firebase-admin'
@@ -54,6 +55,25 @@ async function replyOrPush(replyToken: string, lineUserId: string, text: string)
   await pushMessage(lineUserId, text)
 }
 
+// 把偵測到的活動寫成場合＋筆記，讓「在哪認識這個人」變成自動記錄的事實
+async function recordSource(lineUserId: string, contactId: string, ev: MatchedEvent) {
+  await updateContactSource(lineUserId, contactId, ev.title)
+  await addContactNote(
+    lineUserId, contactId,
+    `在「${ev.title}」認識${ev.location ? `（${ev.location}）` : ''}`
+  )
+}
+
+function sourceDetectedText(ev: MatchedEvent): string {
+  return [
+    `📍 已記錄場合：${ev.title}`,
+    `🕐 ${ev.when}`,
+    ev.location ? `📌 ${ev.location}` : '',
+    '',
+    '不是這個場合的話，按下面修改。',
+  ].filter(Boolean).join('\n')
+}
+
 // ── 名片掃描（單張）────────────────────────────────────────
 async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
   await replyMessage(replyToken, '📷 收到名片，分析中...')
@@ -71,12 +91,22 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
     .catch(err => console.error('Card image upload failed:', err))
 
   await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
-  await pushSourceQuickReply(lineUserId, contactId)
+
+  // 從日曆推測認識場合：拍名片的當下通常正在某個活動裡
+  const matched = await findEventAround(lineUserId, new Date())
+  if (matched) {
+    await recordSource(lineUserId, contactId, matched)
+    await pushSourceDetected(lineUserId, contactId, sourceDetectedText(matched))
+  } else {
+    await pushSourceQuickReply(lineUserId, contactId)
+  }
 
   // 讓 agent 的對話記憶知道剛掃了誰，之後「他的電話多少？」接得上
   const displayName = card.nameZh || card.nameEn || '未知'
-  appendSystemNote(lineUserId, `剛掃描了一張名片並建檔：${displayName}（${card.company}）`)
-    .catch(err => console.error('Conversation note failed:', err))
+  appendSystemNote(
+    lineUserId,
+    `剛掃描了一張名片並建檔：${displayName}（${card.company}）${matched ? `，場合是「${matched.title}」` : ''}`
+  ).catch(err => console.error('Conversation note failed:', err))
 
   if (!card.services || card.services.length === 0) {
     await setPendingNote(lineUserId, contactId)
@@ -94,6 +124,9 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
   const successful: ScanResult[] = []
   let failedCount = 0
 
+  // 一疊名片通常來自同一場活動，只查一次日曆就好
+  const matched = await findEventAround(lineUserId, new Date())
+
   // 依序處理，避免同時呼叫 API 影響辨識品質
   for (const { messageId } of events) {
     try {
@@ -103,6 +136,7 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
       uploadCardImage(imageBuffer, contactId)
         .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
         .catch(err => console.error('Card image upload failed:', err))
+      if (matched) await recordSource(lineUserId, contactId, matched)
       successful.push({ card, contactId })
     } catch (err) {
       console.error('Card scan failed:', err)
@@ -113,6 +147,7 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
   const lines = [
     `✅ 批次掃描完成！共 ${successful.length} 張名片`,
     ...(failedCount > 0 ? [`⚠️ ${failedCount} 張分析失敗`] : []),
+    ...(matched ? [`📍 場合：${matched.title}（已自動記錄）`] : []),
     '',
     ...successful.map(({ card }, i) => {
       const name = card.nameZh || card.nameEn || '未知'
@@ -120,7 +155,7 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
       return `${i + 1}. ${name}${company} ⭐${card.score}/10 ${card.category}`
     }),
     '',
-    '📌 場合資訊與服務項目可至後台補充',
+    matched ? '📌 場合記錯的話跟我說一聲，我幫你改' : '📌 場合資訊與服務項目可至後台補充',
   ]
 
   await pushMessage(lineUserId, lines.join('\n'))

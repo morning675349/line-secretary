@@ -1,1 +1,78 @@
 @AGENTS.md
+
+# LINE 特助系統（line-secretary）
+
+晨安的個人特助：LINE Bot 加 Google 日曆、名片辨識、聯絡人管理。
+
+Next.js + Firebase（Firebase 專案 ID 是 `special-assistant`，跟資料夾名稱不同）。
+
+## 最大的坑：Vercel 專案對不上
+
+**本機 `.vercel/project.json` 連到的是錯的專案**（`wcmep-quote-system`），不要相信它。
+
+Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
+
+| 專案 | 狀態 |
+|---|---|
+| `line-secretary` | 沒有任何環境變數，**不是**上線用的 |
+| `line-secretary-m6ji` | **這才是真正上線中的**，https://line-secretary-m6ji.vercel.app |
+| `wcmep-quote-system` | 完全不相關，但本機錯誤連到它 |
+
+**部署一律用 `git push origin main`。**
+
+這個專案接了 GitHub 自動部署，push 完幾分鐘內就會正確上線。
+
+**不要在本機資料夾跑 `vercel --prod`**，2026-07-18 這樣做過一次，原始碼被送到 `wcmep-quote-system` 建置，因缺 `OPENAI_API_KEY` 失敗。所幸失敗不影響正式別名。
+
+真的要用 CLI 操作 env 時，先用 `vercel env ls production` 確認看得到 `FIREBASE_STORAGE_BUCKET` 那一整組變數，那才是對的專案。
+
+## 其他要知道的事
+
+- **AI 引擎是 OpenAI `gpt-5.5`**，模型字串集中在 `lib/ai.ts` 的 `AGENT_MODEL`，要升級只改那一行。曾一度改用 Claude，但使用者不想多開一個供應商帳單，故改回 OpenAI，沿用既有的 `OPENAI_API_KEY`。
+- **`ALLOWED_LINE_USER_IDS` 建議要設**。逗號分隔的 LINE userId 白名單，未設定等於全放行。agent 每句話都有 API 成本，陌生人加好友就能燒錢。
+- **後台密碼**在 `.env.local` 的 `ADMIN_PASSWORD`，同時存在 Vercel 的 `line-secretary-m6ji`（production 與 development）。若使用者說忘記密碼，直接看 `.env.local` 或引導他去那個專案的 Environment Variables 頁面，不要再重複掃描其他專案。
+
+## 架構現況（Phase 1 大腦升級，2026-07-26 已上線）
+
+已從 regex 指令比對改成 tool-calling agent。
+
+- `lib/agent.ts`：13 個工具，手動迴圈最多 8 輪
+- `lib/conversation.ts`：對話記憶存 Firestore `conversations`，6 小時或 12 輪
+- `lib/transcribe.ts`：語音訊息走 Whisper 轉文字再進 agent
+- 名片 OCR 改用 vision 加 `json_schema` strict，掃描後的場合與修正按鈕仍走 pending 快速流程
+- 登入走 `lib/admin-session.ts` 簽發的 HMAC session token，常數時間雜湊比對，15 分鐘 5 次失敗鎖定（2026-07-18 OWASP 修復後的版本）
+
+## 認識場合自動判定（2026-07-27）
+
+掃名片時自動從 Google 日曆判定「在哪認識這個人」，不用再手動按按鈕選。
+
+- 判定邏輯在 `lib/event-matching.ts`，是**純函式、零 I/O**，所以能單獨測試。改評分規則請改這裡
+- 評分：進行中 100，剛散會 80 遞減到 50（3 小時內），提早到場 60 遞減到 40（2 小時內），整天活動 45
+- 整天活動壓在「剛散會」之下是刻意的：展期中若另有具體會議，那場會議才是真正認識人的場合
+- Google 日曆的整天活動 `end.date` 是**不含當天的隔天**，判斷區間要用 `start <= 當天 < end`
+- 日曆沒連結或 API 出錯時回傳 null，退回原本的固定按鈕，不會中斷掃名片流程
+- 批次掃描只查一次日曆，整疊名片套用同一個場合
+
+舊資料回補走 agent 的兩段式工具：`preview_source_backfill` 產生提案存進 Firestore 的 `pendingBackfill`，使用者確認後才用 `apply_source_backfill` 寫入。**system prompt 有明確禁止跳過確認**，改動時不要拿掉。單次最多掃 20 個日期，超過會在回覆裡告知還剩幾天沒掃。
+
+## 測試
+
+`npm test`（Node 內建 test runner 加 `--experimental-strip-types`，不需額外依賴）。
+
+目前只涵蓋 `lib/event-matching.ts` 的 13 個情境。因為要讓 Node 直接跑 .ts，測試檔的 import 需要帶 `.ts` 副檔名，tsconfig 因此開了 `allowImportingTsExtensions`。
+
+## 環境地雷：這個專案在 iCloud Drive 裡
+
+`node_modules` 放在 iCloud 同步目錄，**大檔案會同步不完整**。
+
+2026-07-27 踩過：`npm install` 之後 `typescript/lib/lib.dom.d.ts` 和 `lib.es5.d.ts` 兩個最大的檔案沒被寫進去（88 個 .d.ts，正常要 102 個），`npx tsc` 噴一堆 `Cannot find global type 'Boolean'`。同一個指令在 iCloud 外面裝就完全正常。
+
+**修法：`npm ci`**（`npm install`、`--force`、單獨重裝 typescript 都救不回來）。
+
+iCloud 還會產生檔名帶「 2」的衝突副本，例如 `.next/types/routes.d 2.ts`，會讓 tsc 報 duplicate identifier。用 `find .next -name "* 2.*" -delete` 清掉。
+
+`app/favicon.ico` 也被 iCloud 清成 0 bytes 過，commit 前記得看一下 `git status` 有沒有莫名其妙的檔案變動。
+
+## Phase 2/3 規劃（尚未動工）
+
+Flex Message 卡片介面、早報快速回覆按鈕、會前情報推播、人脈週報、行事曆改期與刪除、webhook 先回應再背景處理加事件去重。
