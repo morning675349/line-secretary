@@ -2,7 +2,7 @@
 
 # LINE 特助系統（line-secretary）
 
-晨安的個人特助：LINE Bot 加 Google 日曆、名片辨識、聯絡人管理。
+晨安的個人特助，Bot 名稱是**「安安特助」**：LINE Bot 加 Google 日曆、名片辨識、聯絡人管理。
 
 Next.js + Firebase。
 
@@ -31,7 +31,9 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 ## 其他要知道的事
 
 - **AI 引擎是 OpenAI `gpt-5.5`**，模型字串集中在 `lib/ai.ts` 的 `AGENT_MODEL`，要升級只改那一行。曾一度改用 Claude，但使用者不想多開一個供應商帳單，故改回 OpenAI，沿用既有的 `OPENAI_API_KEY`。
-- **`ALLOWED_LINE_USER_IDS` 建議要設**。逗號分隔的 LINE userId 白名單，未設定等於全放行。agent 每句話都有 API 成本，陌生人加好友就能燒錢。
+- **`ALLOWED_LINE_USER_IDS` 建議要設**。逗號分隔的 LINE userId 白名單，未設定等於全放行。agent 每句話都有 API 成本，陌生人加好友就能燒錢。晨安本人的 userId 是 `Ud76a9b031cc52467382e5f22380c1a3e`。
+- **Vercel 方案是 Hobby**，函式上限 60 秒，程式裡寫的 `maxDuration = 300` 會被靜默無視。一次掃超過 5 張名片有跑到一半被砍的風險，且不會有錯誤訊息。要根治得改成「先回應再背景分批處理」，或升級 Pro。
+- **`CRON_SECRET` 在 Vercel 被標記為 Sensitive，值讀不回來**。需要在本機用健康檢查時，只能重新產生一組（`openssl rand -hex 32`）兩邊同步，不要試圖從 Vercel 複製。
 - **後台密碼**在 `.env.local` 的 `ADMIN_PASSWORD`，同時存在 Vercel 的 `line-secretary-m6ji`（production 與 development）。若使用者說忘記密碼，直接看 `.env.local` 或引導他去那個專案的 Environment Variables 頁面，不要再重複掃描其他專案。
 
 ## 架構現況（Phase 1 大腦升級，2026-07-26 已上線）
@@ -56,6 +58,27 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 - 批次掃描只查一次日曆，整疊名片套用同一個場合
 
 舊資料回補走 agent 的兩段式工具：`preview_source_backfill` 產生提案存進 Firestore 的 `pendingBackfill`，使用者確認後才用 `apply_source_backfill` 寫入。**system prompt 有明確禁止跳過確認**，改動時不要拿掉。單次最多掃 20 個日期，超過會在回覆裡告知還剩幾天沒掃。
+
+## LINE 憑證：失效時怎麼換（2026-07-27 實際跑過）
+
+Channel access token 失效的症狀很有欺騙性：站台 200、webhook 200、agent 正常執行，**唯一症狀是使用者完全收不到回覆**。判斷方法是直接問 LINE 官方 API：
+
+```
+curl -s https://api.line.me/v2/bot/info -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN"
+```
+
+回 `Authentication failed` 就是 token 死了。長期 token 不會自己過期，失效幾乎都是因為有人在 Console 按過 Issue，舊的當下就作廢。
+
+重新發行路徑（這條路當時找了好幾輪）：
+
+1. https://developers.line.biz/console/ → 左側 Provider 選 **安安特助**（不是奇策整合行銷等客戶用的 Provider）
+2. 該頁**往上捲**才看得到現有頻道，往下捲會看到「Create a channel」誤以為沒有頻道
+3. 進頻道後先在 **Basic settings** 確認 Channel secret 開頭是 `01a090`，確保沒選錯
+4. 切 **Messaging API** 分頁，**捲到最底部** 的 Channel access token (long-lived) → Issue，舊 token 失效時間選 0
+5. 貼到 Vercel `line-secretary-m6ji` 的 `LINE_CHANNEL_ACCESS_TOKEN`
+6. **Vercel 環境變數改完一定要重新部署才生效**，用 `git commit --allow-empty` 推一次即可
+
+同一頁順便確認：Webhook URL 正確、Use webhook 開啟、Auto-reply messages 關閉（後者會用罐頭訊息蓋掉 webhook 回覆，症狀很像壞掉）。
 
 ## 健康檢查（出問題先跑這個）
 
