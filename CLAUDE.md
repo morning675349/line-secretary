@@ -4,7 +4,9 @@
 
 晨安的個人特助：LINE Bot 加 Google 日曆、名片辨識、聯絡人管理。
 
-Next.js + Firebase（Firebase 專案 ID 是 `special-assistant`，跟資料夾名稱不同）。
+Next.js + Firebase。
+
+**Firebase 專案 ID 是 `special-assistant-9a791`**，不是 `special-assistant`，也不是資料夾名稱。判斷依據是服務帳號信箱 `...@special-assistant-9a791.iam.gserviceaccount.com`，那個網域段才是真正的專案 ID。2026-07-27 之前 `.env.local` 一直寫成 `special assistant`（中間是空格），所以本機根本連不上 Firestore，只有正式環境是對的。
 
 ## 最大的坑：Vercel 專案對不上
 
@@ -54,6 +56,24 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 - 批次掃描只查一次日曆，整疊名片套用同一個場合
 
 舊資料回補走 agent 的兩段式工具：`preview_source_backfill` 產生提案存進 Firestore 的 `pendingBackfill`，使用者確認後才用 `apply_source_backfill` 寫入。**system prompt 有明確禁止跳過確認**，改動時不要拿掉。單次最多掃 20 個日期，超過會在回覆裡告知還剩幾天沒掃。
+
+## 健康檢查（出問題先跑這個）
+
+```
+curl -H "Authorization: Bearer $CRON_SECRET" https://line-secretary-m6ji.vercel.app/api/health
+```
+
+一次檢查環境變數、LINE token、Firestore、OpenAI 四項，全過回 200，任一項掛掉回 503 並指出是哪一項。
+
+**這支端點是 2026-07-27 事故的產物。** 當時 LINE access token 失效，但站台 200、webhook 200、agent 跑得好好的，唯一症狀是使用者收不到任何回覆。原因是 `lib/line-client.ts` 所有 fetch 都不檢查回應，LINE 回 401 也當成成功。現在 `callLineApi` 會檢查 `res.ok` 並丟例外，token 失效時 log 會直接寫出「請重新發行」。
+
+**送訊失敗絕對不要改回靜默忽略**，那會讓整個系統失去自我察覺能力。
+
+## 資料層的兩個地雷
+
+**不要用 `where` 加 `orderBy` 的複合查詢。** Firestore 需要另外建索引，沒建就整支拋錯。早報 (`api/cron/daily-briefing`) 就是這樣從上線起無聲失敗到 2026-07-27 才被發現，因為錯誤被 try/catch 吞掉。`lib/contact-service.ts` 的 `getPendingFollowUps` 是刻意改成全撈進記憶體再過濾的版本，要查跟進名單一律用它。
+
+**目前所有查詢都是全集合掃描再用 JS 過濾**（`searchContacts`、`getContactStats`、`getContactsNeedingSource`）。64 筆時無感，上千筆會明顯變慢且 Firestore 讀取費用線性成長。真的要擴充再處理，不用提前優化。
 
 ## 測試
 

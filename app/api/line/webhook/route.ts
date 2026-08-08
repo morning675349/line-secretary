@@ -42,7 +42,8 @@ function verifySignature(body: string, signature: string): boolean {
   return crypto.timingSafeEqual(hash, sigBuf)
 }
 
-// 回覆優先用 replyToken（不佔推播額度），agent 跑太久 token 過期就改用 push
+// 回覆優先用 replyToken（不佔推播額度），agent 跑太久 token 過期就改用 push。
+// replyMessage 現在會在 LINE 回非 2xx 時丟例外，這個 fallback 才真正有作用。
 async function replyOrPush(replyToken: string, lineUserId: string, text: string) {
   try {
     if (replyToken) {
@@ -53,6 +54,16 @@ async function replyOrPush(replyToken: string, lineUserId: string, text: string)
     console.error('Reply failed, falling back to push:', err)
   }
   await pushMessage(lineUserId, text)
+}
+
+// 錯誤通知本身失敗時不能再往外丟，否則 webhook 回 500 會讓 LINE 反覆重送，
+// 造成同一則訊息被處理多次（名片重複建檔、agent 重複計費）。
+async function notifyFailureQuietly(replyToken: string, lineUserId: string, text: string) {
+  try {
+    await replyOrPush(replyToken, lineUserId, text)
+  } catch (err) {
+    console.error('Failed to deliver error notice to user:', err)
+  }
 }
 
 // 把偵測到的活動寫成場合＋筆記，讓「在哪認識這個人」變成自動記錄的事實
@@ -284,7 +295,7 @@ export async function POST(req: NextRequest) {
       )
     } catch (err) {
       console.error('Batch image error:', err)
-      await pushMessage(lineUserId, '⚠️ 批次掃描發生錯誤，請稍後再試')
+      await notifyFailureQuietly('', lineUserId, '⚠️ 批次掃描發生錯誤，請稍後再試')
     }
   } else if (imageEvents.length === 1) {
     const e = imageEvents[0]
@@ -293,7 +304,7 @@ export async function POST(req: NextRequest) {
       await handleImageMessage(e.message.id, e.replyToken, lineUserId)
     } catch (err) {
       console.error('Image handling error:', err)
-      if (e.replyToken) await replyMessage(e.replyToken, '⚠️ 發生錯誤，請稍後再試')
+      await notifyFailureQuietly(e.replyToken, lineUserId, '⚠️ 發生錯誤，請稍後再試')
     }
   }
 
@@ -314,11 +325,7 @@ export async function POST(req: NextRequest) {
       const msg = !process.env.OPENAI_API_KEY
         ? '⚠️ AI 引擎尚未設定（缺少 OPENAI_API_KEY），請先到 Vercel 環境變數補上'
         : '⚠️ 發生錯誤，請稍後再試'
-      if (replyToken) {
-        try { await replyMessage(replyToken, msg) } catch { await pushMessage(lineUserId, msg) }
-      } else {
-        await pushMessage(lineUserId, msg)
-      }
+      await notifyFailureQuietly(replyToken, lineUserId, msg)
     }
   }
 

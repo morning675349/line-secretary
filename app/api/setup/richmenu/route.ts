@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { NextRequest, NextResponse } from 'next/server'
+import { requireCronAuth } from '@/lib/cron-auth'
 
 const LINE_API = 'https://api.line.me/v2/bot'
 const headers = {
@@ -56,10 +57,8 @@ const richMenuBody = {
 }
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get('authorization')
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const denied = requireCronAuth(req)
+  if (denied) return denied
 
   try {
     // 建立選單結構
