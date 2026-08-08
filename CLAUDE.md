@@ -80,6 +80,18 @@ curl -s https://api.line.me/v2/bot/info -H "Authorization: Bearer $LINE_CHANNEL_
 
 同一頁順便確認：Webhook URL 正確、Use webhook 開啟、Auto-reply messages 關閉（後者會用罐頭訊息蓋掉 webhook 回覆，症狀很像壞掉）。
 
+## 業務戰情（2026-08-08）
+
+記錄簽案與收款，追蹤三大觸發器進度。門檻數字來自 vault 的 `decisions/2026-08-04_奇策年度經營決策_顧問團診斷.md`，**改門檻只改 `lib/business-progress.ts` 頂部的常數**。
+
+- `lib/deal-service.ts`：Firestore `deals` 與 `payments` 兩個集合，軟刪除（`voided: true`），查詢比照 contact-service 全撈記憶體過濾
+- `lib/business-progress.ts`：進度計算純函式（比照 event-matching 模式），有完整測試
+- agent 新增 5 個工具：`record_deal`、`record_payment`、`get_business_progress`、`list_business_records`、`void_business_record`
+- 三大觸發器：買車里程碑（月簽約 38 萬 × 連續 3 月）、請製作人力（外包溢出 ≥2 案 × 連續 3 月）、請 SEO 執行（有效年約 ≥7 家，簽約後 12 個月內有效）
+- 連續月數的計算刻意「本月未達標不斷開紀錄」，因為月中還在進行；本月達標才納入連續數
+- `adsStatusLine` 是時間敏感的硬編碼（8/31 前置、9–11 月測試期、12 月起提醒收斂），2026 作戰計畫結束後要改寫或移除
+- 口語金額由 agent 換算成元再進工具（12萬 → 120000），工具端只收純數字字串
+
 ## 健康檢查（出問題先跑這個）
 
 ```

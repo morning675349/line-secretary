@@ -12,6 +12,12 @@ import {
   createCalendarEvent, listEvents, isCalendarConnected, getAuthUrl,
   fetchEventsOnDate, pickBestEvent, taipeiDate,
 } from './google-calendar'
+import {
+  addDeal, addPayment, getDeals, getPayments, voidLatestRecord,
+  toDealLites, toPaymentLites, parseDateOrToday,
+  DealProduct, DealDelivery, DEAL_PRODUCTS, DEAL_DELIVERIES,
+} from './deal-service'
+import { computeProgress, formatProgress, adsStatusLine, taipeiYm } from './business-progress'
 
 // ── 工具回傳的聯絡人摘要 ─────────────────────────────────────
 function contactBrief(c: Contact): string {
@@ -204,6 +210,88 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'record_deal',
+      description: '記錄一筆新簽的案子（簽約成交才記，談案中不記）。使用者說「簽了XX公司12萬網站案」「XX的SEO年約成交了」時用這個。金額一律換算成元（12萬=120000）。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          client: { type: 'string', description: '客戶名稱（公司名或慣用簡稱）' },
+          amount: { type: 'string', description: '簽約金額，純數字字串，單位元，例如 120000' },
+          product: { type: 'string', enum: ['網頁', 'SEO年約', '主機維護', '廣告', '其他'] },
+          delivery: { type: 'string', enum: ['內部', '外包', '未定'], description: '交付方式。使用者沒講就填未定' },
+          note: { type: 'string', description: '備註，沒有就空字串' },
+          signed_date: { type: 'string', description: '簽約日 YYYY-MM-DD，使用者沒講就空字串（=今天）' },
+        },
+        required: ['client', 'amount', 'product', 'delivery', 'note', 'signed_date'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'record_payment',
+      description: '記錄一筆實際收到的款項。使用者說「XX付了訂金4.8萬」「收到XX尾款」時用這個。金額一律換算成元。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          client: { type: 'string', description: '付款的客戶名稱' },
+          amount: { type: 'string', description: '收款金額，純數字字串，單位元' },
+          note: { type: 'string', description: '款項性質（訂金/期中款/尾款/年約款等），沒有就空字串' },
+          paid_date: { type: 'string', description: '收款日 YYYY-MM-DD，沒講就空字串（=今天）' },
+        },
+        required: ['client', 'amount', 'note', 'paid_date'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_business_progress',
+      description: '業務戰情報告：本月簽約與實收、三大觸發器進度（買車里程碑38萬×3月、請製作人力=外包溢出2案×3月、請SEO執行=年約7家）、廣告時間軸。使用者問「進度」「戰情」「差多遠」「這個月簽多少」時用這個。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_business_records',
+      description: '列出某個月的簽案與收款明細，供核對。使用者說「這個月簽了哪些」「列一下八月的帳」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          month: { type: 'string', description: '月份 YYYY-MM，空字串=本月' },
+        },
+        required: ['month'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'void_business_record',
+      description: '作廢一筆記錯的簽案或收款（取最近一筆符合該客戶名的紀錄）。使用者說「剛剛那筆記錯了」「刪掉XX那筆收款」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['簽案', '收款'] },
+          client: { type: 'string', description: '客戶名稱' },
+        },
+        required: ['kind', 'client'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_calendar_event',
       description: '在 Google 日曆建立行程。從使用者的自然語言解析出標題與時間後呼叫。時間沒講明結束就預設 1 小時。',
       strict: true,
@@ -373,6 +461,59 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       return events.map(e => `${e.date} ${e.time} ${e.title}${e.location ? ` @ ${e.location}` : ''}`).join('\n')
     },
 
+    async record_deal({ client, amount, product, delivery, note, signed_date }) {
+      const amt = Number(amount.replace(/[,\s]/g, ''))
+      if (!Number.isFinite(amt) || amt <= 0) return `金額「${amount}」無法解析，請確認後重試。`
+      if (!(DEAL_PRODUCTS as readonly string[]).includes(product)) return `產品線「${product}」不在清單內。`
+      const signedAt = parseDateOrToday(signed_date)
+      if (!signedAt) return `日期「${signed_date}」格式錯誤，要用 YYYY-MM-DD。`
+      await addDeal(lineUserId, client, amt, product as DealProduct, delivery as DealDelivery, note, signedAt)
+      return `已記錄簽案：${client}｜${product}｜${amt.toLocaleString()} 元｜交付：${delivery}${note ? `｜${note}` : ''}`
+    },
+
+    async record_payment({ client, amount, note, paid_date }) {
+      const amt = Number(amount.replace(/[,\s]/g, ''))
+      if (!Number.isFinite(amt) || amt <= 0) return `金額「${amount}」無法解析，請確認後重試。`
+      const paidAt = parseDateOrToday(paid_date)
+      if (!paidAt) return `日期「${paid_date}」格式錯誤，要用 YYYY-MM-DD。`
+      await addPayment(lineUserId, client, amt, note, paidAt)
+      return `已記錄收款：${client}｜${amt.toLocaleString()} 元${note ? `｜${note}` : ''}`
+    },
+
+    async get_business_progress() {
+      const [deals, payments] = await Promise.all([getDeals(lineUserId), getPayments(lineUserId)])
+      const now = new Date()
+      const progress = computeProgress(toDealLites(deals), toPaymentLites(payments), taipeiYm(now))
+      return formatProgress(progress, adsStatusLine(now))
+    },
+
+    async list_business_records({ month }) {
+      const ym = month || taipeiYm(new Date())
+      const [deals, payments] = await Promise.all([getDeals(lineUserId), getPayments(lineUserId)])
+      const monthDeals = deals.filter(d => taipeiYm(d.signedAt.toDate()) === ym)
+      const monthPays = payments.filter(p => taipeiYm(p.paidAt.toDate()) === ym)
+      if (monthDeals.length === 0 && monthPays.length === 0) return `${ym} 還沒有任何簽案或收款紀錄。`
+      const dealLines = monthDeals
+        .sort((a, b) => a.signedAt.seconds - b.signedAt.seconds)
+        .map(d => `・${d.client}｜${d.product}｜${d.amount.toLocaleString()} 元｜${d.delivery}${d.note ? `｜${d.note}` : ''}`)
+      const payLines = monthPays
+        .sort((a, b) => a.paidAt.seconds - b.paidAt.seconds)
+        .map(p => `・${p.client}｜${p.amount.toLocaleString()} 元${p.note ? `｜${p.note}` : ''}`)
+      return [
+        `${ym} 簽案 ${monthDeals.length} 筆：`,
+        ...(dealLines.length ? dealLines : ['（無）']),
+        '',
+        `${ym} 收款 ${monthPays.length} 筆：`,
+        ...(payLines.length ? payLines : ['（無）']),
+      ].join('\n')
+    },
+
+    async void_business_record({ kind, client }) {
+      const voided = await voidLatestRecord(lineUserId, kind as '簽案' | '收款', client)
+      if (!voided) return `找不到「${client}」的${kind}紀錄，沒有東西被作廢。`
+      return `已作廢最近一筆${kind}：${voided}`
+    },
+
     async create_calendar_event({ title, start_iso, end_iso, location }) {
       if (!(await isCalendarConnected(lineUserId))) {
         const url = await getAuthUrl(lineUserId)
@@ -407,6 +548,14 @@ function systemPrompt(): string {
 1. 人脈管理：搜尋聯絡人、更新跟進狀態、記筆記、修正名片辨識錯誤、修改認識場合、回報統計
 2. 行程管理：查詢與建立 Google 日曆行程
 3. 起草訊息：撰寫 LINE/Email 跟進訊息（先用 get_contact_details 拿完整背景與筆記再寫，草稿要自然、專業、有溫度、不官腔，LINE 訊息 100 字內）
+4. 業務戰情：記錄簽案（record_deal）與收款（record_payment），回報三大觸發器進度（get_business_progress）
+
+業務戰情規則：
+- 「簽了/成交/拿下XX案」= record_deal；「收到款/付了訂金/入帳」= record_payment；「進度/戰情/差多遠」= get_business_progress
+- 金額口語要換算成元：12萬=120000、4萬8=48000
+- 使用者說「跟某聯絡人成交了」時，除了 record_deal 也要順手 update_contact_status 成「成交」
+- 產品線分類：網站/官網/改版=網頁；SEO/AEO年約=SEO年約；主機/維護=主機維護；分不出來就問一句
+- 三大觸發器的門檻寫在工具回覆裡，不要自己編數字
 
 行為準則：
 - 動手前先用工具查證，不要憑空猜測人脈庫內容
