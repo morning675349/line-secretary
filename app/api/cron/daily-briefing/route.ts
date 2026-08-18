@@ -7,6 +7,7 @@ import { pushMessage } from '@/lib/line-client'
 import { getTodayEvents } from '@/lib/google-calendar'
 import { getPendingFollowUps } from '@/lib/contact-service'
 import { requireCronAuth } from '@/lib/cron-auth'
+import { getPostingReminder, POSTING_REMINDER_OWNER } from '@/lib/posting-schedule'
 
 export async function GET(req: NextRequest) {
   const denied = requireCronAuth(req)
@@ -29,7 +30,10 @@ export async function GET(req: NextRequest) {
         // Calendar not connected
       }
 
-      if (followUps.length === 0 && events.length === 0) {
+      // 發文提醒只推給帳號本人；其他使用者維持原本的早報行為。
+      const postingReminder = lineUserId === POSTING_REMINDER_OWNER ? getPostingReminder(new Date()) : null
+
+      if (followUps.length === 0 && events.length === 0 && !postingReminder) {
         results.push({ user: lineUserId.slice(0, 8), sent: false })
         continue
       }
@@ -53,6 +57,14 @@ export async function GET(req: NextRequest) {
         })
         lines.push('')
         lines.push('輸入「跟進」查看詳情')
+        lines.push('')
+      }
+
+      if (postingReminder) {
+        lines.push('📣 今日發文提醒：')
+        lines.push(`  ${postingReminder}`)
+        lines.push('')
+        lines.push('（養號期：一天一篇，發完關 App，過幾小時回來回留言）')
       }
 
       await pushMessage(lineUserId, lines.join('\n'))
