@@ -32,7 +32,7 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 
 - **AI 引擎是 OpenAI `gpt-5.5`**，模型字串集中在 `lib/ai.ts` 的 `AGENT_MODEL`，要升級只改那一行。曾一度改用 Claude，但使用者不想多開一個供應商帳單，故改回 OpenAI，沿用既有的 `OPENAI_API_KEY`。
 - **`ALLOWED_LINE_USER_IDS` 建議要設**。逗號分隔的 LINE userId 白名單，未設定等於全放行。agent 每句話都有 API 成本，陌生人加好友就能燒錢。晨安本人的 userId 是 `Ud76a9b031cc52467382e5f22380c1a3e`。
-- **Vercel 方案是 Hobby**，函式上限 60 秒，程式裡寫的 `maxDuration = 300` 會被靜默無視。一次掃超過 5 張名片有跑到一半被砍的風險，且不會有錯誤訊息。要根治得改成「先回應再背景分批處理」，或升級 Pro。
+- **Vercel 方案是 Hobby**，函式上限 60 秒，cron 一天只能觸發一次。批次掃名片已在 2026-09-09 改成限流並行加時間預算（見下方「逾時預算」），不再靜默被砍。
 - **`CRON_SECRET` 在 Vercel 被標記為 Sensitive，值讀不回來**。需要在本機用健康檢查時，只能重新產生一組（`openssl rand -hex 32`）兩邊同步，不要試圖從 Vercel 複製。
 - **後台密碼**在 `.env.local` 的 `ADMIN_PASSWORD`，同時存在 Vercel 的 `line-secretary-m6ji`（production 與 development）。若使用者說忘記密碼，直接看 `.env.local` 或引導他去那個專案的 Environment Variables 頁面，不要再重複掃描其他專案。
 
@@ -40,7 +40,7 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 
 已從 regex 指令比對改成 tool-calling agent。
 
-- `lib/agent.ts`：13 個工具，手動迴圈最多 8 輪
+- `lib/agent.ts`：22 個工具，手動迴圈最多 8 輪
 - `lib/conversation.ts`：對話記憶存 Firestore `conversations`，6 小時或 12 輪
 - `lib/transcribe.ts`：語音訊息走 Whisper 轉文字再進 agent
 - 名片 OCR 改用 vision 加 `json_schema` strict，掃描後的場合與修正按鈕仍走 pending 快速流程
@@ -114,7 +114,12 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://line-secretary-m6ji.vercel.
 
 `npm test`（Node 內建 test runner 加 `--experimental-strip-types`，不需額外依賴）。
 
-目前只涵蓋 `lib/event-matching.ts` 的 13 個情境。因為要讓 Node 直接跑 .ts，測試檔的 import 需要帶 `.ts` 副檔名，tsconfig 因此開了 `allowImportingTsExtensions`。
+共 64 項，涵蓋 `event-matching`、`meeting-intel`、`weekly-report`、`batch`、`flex`、`business-progress`、`posting-schedule`。
+
+**這個專案的慣例是：會出錯的判斷邏輯一律抽成零 I/O 的純函式模組再測。**
+碰 Firestore 或外部 API 的那層不寫測試，靠型別檢查與正式環境驗證。
+
+因為要讓 Node 直接跑 .ts，測試檔的 import 需要帶 `.ts` 副檔名，tsconfig 因此開了 `allowImportingTsExtensions`。
 
 ## 環境地雷：這個專案在 iCloud Drive 裡
 
