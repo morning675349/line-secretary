@@ -1,5 +1,7 @@
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+// Hobby 方案的硬上限就是 60 秒，寫 300 只會被靜默忽略並誤導後續維護者。
+// 升級 Pro 之後可以調高，同時記得放寬下面的 BATCH_DEADLINE_MS。
+export const maxDuration = 60
 
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
@@ -13,11 +15,15 @@ import { uploadCardImage } from '@/lib/storage'
 import { db } from '@/lib/firebase-admin'
 import {
   saveContact, updateContactSource, updateContactField, addContactNote,
+  getContactById, updateContactStatus,
   setPendingSource, consumePendingSource, getLatestContact,
   setPendingNote, consumePendingNote,
   setPendingCorrection, consumePendingCorrection,
 } from '@/lib/contact-service'
 import { runAgent } from '@/lib/agent'
+import { claimEvent } from '@/lib/dedup'
+import { getExpoMode, bumpExpoCount, ExpoMode } from '@/lib/expo-mode'
+import { runBatch } from '@/lib/batch'
 import { transcribeAudio } from '@/lib/transcribe'
 import { appendSystemNote } from '@/lib/conversation'
 
@@ -85,28 +91,68 @@ function sourceDetectedText(ev: MatchedEvent): string {
   ].filter(Boolean).join('\n')
 }
 
-// ── 名片掃描（單張）────────────────────────────────────────
-async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
-  await replyMessage(replyToken, '📷 收到名片，分析中...')
+// 展場模式下，一次掃幾十張名片，每張回三則訊息會把通知洗爆，
+// 所以改成只回一行進度。時間預算抓在 Vercel Hobby 60 秒上限之前。
+// deadline 只擋「還沒開始」的工作，不會中斷進行中的。
+// 最壞情況是 deadline 前一刻才開跑的那張再花 15 秒，加上收尾推播，
+// 所以預算要抓在 60 秒上限減去（單張最久 + 推播時間）。
+const BATCH_DEADLINE_MS = 32_000
+const BATCH_CONCURRENCY = 3
 
+type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string }
+
+/** 掃一張名片並建檔，場合優先用展場模式宣告的名稱，其次才問日曆 */
+async function scanCard(
+  messageId: string, lineUserId: string, expo: ExpoMode | null, matched: MatchedEvent | null
+): Promise<ScanResult> {
   const imageBuffer = await downloadLineImage(messageId)
   const card = await analyzeCard(imageBuffer)
-
-  const followUpDate = new Date()
-  followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
-
   const contactId = await saveContact(lineUserId, card)
 
   uploadCardImage(imageBuffer, contactId)
     .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
     .catch(err => console.error('Card image upload failed:', err))
 
-  await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
+  if (expo) {
+    await updateContactSource(lineUserId, contactId, expo.source)
+    await addContactNote(lineUserId, contactId, `在「${expo.source}」認識`)
+  } else if (matched) {
+    await recordSource(lineUserId, contactId, matched)
+  }
+
+  return { card, contactId }
+}
+
+function cardLine(card: ScanResult['card'], index?: number): string {
+  const name = card.nameZh || card.nameEn || '未知'
+  const company = card.company ? `（${card.company}）` : ''
+  const prefix = index === undefined ? '' : `${index}. `
+  return `${prefix}${name}${company} ⭐${card.score}/10 ${card.category}`
+}
+
+// ── 名片掃描（單張）────────────────────────────────────────
+async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
+  const expo = await getExpoMode(lineUserId)
+
+  // 展場模式：極簡回覆，不追問、不逐張確認場合
+  if (expo) {
+    const { card } = await scanCard(messageId, lineUserId, expo, null)
+    const total = await bumpExpoCount(lineUserId)
+    await replyOrPush(replyToken, lineUserId, `📇 第 ${total} 張｜${cardLine(card)}`)
+    return
+  }
+
+  await replyMessage(replyToken, '📷 收到名片，分析中...')
 
   // 從日曆推測認識場合：拍名片的當下通常正在某個活動裡
   const matched = await findEventAround(lineUserId, new Date())
+  const { card, contactId } = await scanCard(messageId, lineUserId, null, matched)
+
+  const followUpDate = new Date()
+  followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
+  await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
+
   if (matched) {
-    await recordSource(lineUserId, contactId, matched)
     await pushSourceDetected(lineUserId, contactId, sourceDetectedText(matched))
   } else {
     await pushSourceQuickReply(lineUserId, contactId)
@@ -125,46 +171,47 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   }
 }
 
-// ── 名片掃描（批次，依序處理）──────────────────────────────
+// ── 名片掃描（批次）────────────────────────────────────────
+// 限流並行取代原本的逐張序列：序列處理超過 4 張就會撞到 Hobby 的 60 秒上限，
+// 而且是靜默被砍。現在超時的張數會明確回報，不會不明不白消失。
 async function handleBatchImages(events: { messageId: string; replyToken: string }[], lineUserId: string) {
+  const expo = await getExpoMode(lineUserId)
+
   if (events[0].replyToken) {
-    await replyMessage(events[0].replyToken, `📷 收到 ${events.length} 張名片，依序分析中（請稍候）...`)
+    await replyMessage(events[0].replyToken, `📷 收到 ${events.length} 張名片，分析中...`)
   }
 
-  type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string }
-  const successful: ScanResult[] = []
-  let failedCount = 0
+  // 一疊名片通常來自同一場活動，只查一次日曆就好；展場模式下連查都不用
+  const matched = expo ? null : await findEventAround(lineUserId, new Date())
 
-  // 一疊名片通常來自同一場活動，只查一次日曆就好
-  const matched = await findEventAround(lineUserId, new Date())
+  const outcome = await runBatch(
+    events.map(e => e.messageId),
+    messageId => scanCard(messageId, lineUserId, expo, matched),
+    { concurrency: BATCH_CONCURRENCY, deadlineAt: Date.now() + BATCH_DEADLINE_MS }
+  )
 
-  // 依序處理，避免同時呼叫 API 影響辨識品質
-  for (const { messageId } of events) {
-    try {
-      const imageBuffer = await downloadLineImage(messageId)
-      const card = await analyzeCard(imageBuffer)
-      const contactId = await saveContact(lineUserId, card)
-      uploadCardImage(imageBuffer, contactId)
-        .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
-        .catch(err => console.error('Card image upload failed:', err))
-      if (matched) await recordSource(lineUserId, contactId, matched)
-      successful.push({ card, contactId })
-    } catch (err) {
-      console.error('Card scan failed:', err)
-      failedCount++
-    }
+  outcome.failed.forEach(f => console.error('Card scan failed:', f.error))
+
+  if (expo) {
+    const total = await bumpExpoCount(lineUserId, outcome.done.length)
+    const notes = [
+      ...(outcome.failed.length ? [`⚠️ ${outcome.failed.length} 張辨識失敗`] : []),
+      ...(outcome.skipped.length ? [`⏳ ${outcome.skipped.length} 張來不及處理，請再傳一次`] : []),
+    ]
+    await pushMessage(
+      lineUserId,
+      [`📇 本批 ${outcome.done.length} 張｜累計 ${total} 張`, ...notes].join('\n')
+    )
+    return
   }
 
   const lines = [
-    `✅ 批次掃描完成！共 ${successful.length} 張名片`,
-    ...(failedCount > 0 ? [`⚠️ ${failedCount} 張分析失敗`] : []),
+    `✅ 批次掃描完成！共 ${outcome.done.length} 張名片`,
+    ...(outcome.failed.length > 0 ? [`⚠️ ${outcome.failed.length} 張分析失敗`] : []),
+    ...(outcome.skipped.length > 0 ? [`⏳ ${outcome.skipped.length} 張因處理時間不足未完成，請再傳一次`] : []),
     ...(matched ? [`📍 場合：${matched.title}（已自動記錄）`] : []),
     '',
-    ...successful.map(({ card }, i) => {
-      const name = card.nameZh || card.nameEn || '未知'
-      const company = card.company ? `（${card.company}）` : ''
-      return `${i + 1}. ${name}${company} ⭐${card.score}/10 ${card.category}`
-    }),
+    ...outcome.done.map(({ result }, i) => cardLine(result.card, i + 1)),
     '',
     matched ? '📌 場合記錯的話跟我說一聲，我幫你改' : '📌 場合資訊與服務項目可至後台補充',
   ]
@@ -174,6 +221,35 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
 
 // ── Postback 處理（名片掃描後的快速按鈕，維持固定流程） ──────
 async function handlePostback(data: string, replyToken: string, lineUserId: string) {
+  // Flex 卡片上的「起草跟進訊息」：轉交 agent，沿用它既有的草稿邏輯與筆記脈絡
+  const draftMatch = data.match(/^draft:(\w+)$/)
+  if (draftMatch) {
+    const contact = await getContactById(lineUserId, draftMatch[1])
+    if (!contact) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
+    const displayName = contact.nameZh || contact.nameEn || '這位聯絡人'
+    await replyMessage(replyToken, `✍️ 正在幫你寫給 ${displayName} 的跟進訊息...`)
+    const answer = await runAgent(lineUserId, `幫我寫一則跟進訊息給 ${displayName}（${contact.company}）`)
+    await pushMessage(lineUserId, answer)
+    return
+  }
+
+  // Flex 卡片上的「標記已聯絡」
+  const contactedMatch = data.match(/^contacted:(\w+)$/)
+  if (contactedMatch) {
+    const contact = await getContactById(lineUserId, contactedMatch[1])
+    if (!contact || !contact.id) {
+      await replyMessage(replyToken, '⚠️ 找不到這筆聯絡人')
+      return
+    }
+    await updateContactStatus(lineUserId, contact.id, '已聯絡')
+    const displayName = contact.nameZh || contact.nameEn || '這位聯絡人'
+    await replyMessage(replyToken, `✅ ${displayName}（${contact.company}）已標記為已聯絡`)
+    return
+  }
+
   const srcMatch = data.match(/^src:(.+):(\w+)$/)
   if (srcMatch) {
     const [, source, contactId] = srcMatch
@@ -276,11 +352,21 @@ export async function POST(req: NextRequest) {
 
   const data = JSON.parse(body)
   const allEvents: any[] = data.events || []
-  const events = allEvents.filter(e => {
+  const allowed = allEvents.filter(e => {
     if (isAllowedUser(e.source?.userId)) return true
     console.warn('Blocked non-allowlisted user:', e.source?.userId)
     return false
   })
+
+  // 事件去重：LINE 在回應太慢時會重送整批事件，沒擋掉就會同一張名片建兩筆聯絡人。
+  // claimEvent 用 Firestore 的 create() 做原子性認領，第二次認領同一個 id 會失敗。
+  const claims = await Promise.all(
+    allowed.map(async e => ({ event: e, fresh: await claimEvent(e.webhookEventId || e.message?.id || '') }))
+  )
+  const events = claims.filter(c => c.fresh).map(c => c.event)
+  if (events.length < allowed.length) {
+    console.warn(`Skipped ${allowed.length - events.length} duplicate LINE event(s)`)
+  }
 
   // 批次名片偵測：同一用戶、同一 webhook call 傳多張圖
   const imageEvents = events.filter(e => e.type === 'message' && e.message?.type === 'image')

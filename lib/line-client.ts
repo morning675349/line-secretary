@@ -64,6 +64,32 @@ export async function pushMessage(userId: string, text: string): Promise<void> {
   await callLineApi('/message/push', { to: userId, messages: [{ type: 'text', text }] })
 }
 
+/** 送出 Flex 卡片（由 lib/flex.ts 組好的訊息物件） */
+export async function pushFlex(userId: string, flexMessage: unknown): Promise<void> {
+  await callLineApi('/message/push', { to: userId, messages: [flexMessage] })
+}
+
+/** 純文字加上快速回覆按鈕，讓使用者不必打字就能接續動作 */
+export async function pushMessageWithQuickReply(
+  userId: string,
+  text: string,
+  labels: string[]
+): Promise<void> {
+  await callLineApi('/message/push', {
+    to: userId,
+    messages: [{
+      type: 'text',
+      text,
+      quickReply: {
+        items: labels.slice(0, 13).map(label => ({
+          type: 'action',
+          action: { type: 'message', label, text: label },
+        })),
+      },
+    }],
+  })
+}
+
 export async function pushAnalysisWithCorrect(userId: string, text: string, contactId: string): Promise<void> {
   await callLineApi('/message/push', {
       to: userId,

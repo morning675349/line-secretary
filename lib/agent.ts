@@ -8,6 +8,10 @@ import {
   getContactsNeedingSource, setPendingBackfill, consumePendingBackfill,
   Contact, BackfillItem,
 } from './contact-service'
+import { getExpoMode, startExpoMode, endExpoMode } from './expo-mode'
+import { contactCarousel, ContactCardData } from './flex'
+import { pushFlex } from './line-client'
+import { stripNoteTimestamp } from './meeting-intel'
 import {
   createCalendarEvent, listEvents, isCalendarConnected, getAuthUrl,
   fetchEventsOnDate, pickBestEvent, taipeiDate,
@@ -177,6 +181,56 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: 'apply_source_backfill',
       description: '把上一步 preview_source_backfill 的提案正式寫入資料庫。只有在使用者明確表示確認、要、好、寫入之後才可以呼叫。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'show_contact_cards',
+      description: '把聯絡人以可操作的卡片送出，卡片上有撥號、起草跟進訊息、標記已聯絡的按鈕。使用者要找某個人、或你剛列出幾位聯絡人而他接下來可能想採取動作時，用這個取代純文字清單。查無資料時會告訴你。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜尋關鍵字（姓名、公司、產業或分類）' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'start_expo_mode',
+      description: '開啟展場模式。使用者說「進入展場模式」「開始五金展」「我在展場了」時用這個。開啟後掃名片會自動套用指定場合、回覆縮成一行進度、不再逐張追問，適合一次要掃幾十張的展覽或媒合會。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: '這場活動的名稱，例如「五金展 TiTE x IHT」或「明志科大媒合會」' },
+        },
+        required: ['source'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'end_expo_mode',
+      description: '結束展場模式，回到平常的掃名片流程。使用者說「結束展場模式」「展覽結束了」「收攤」時用這個。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_expo_status',
+      description: '查詢目前是否在展場模式、場合名稱與已掃張數。使用者問「現在掃幾張了」「還在展場模式嗎」時用這個。',
       strict: true,
       parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
     },
@@ -447,6 +501,50 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       return `已回補 ${applied} 筆聯絡人的認識場合。`
     },
 
+    async show_contact_cards({ query }) {
+      const results = await searchContacts(lineUserId, query)
+      if (results.length === 0) return `找不到「${query}」相關的聯絡人，沒有卡片可以顯示。`
+
+      const cards: ContactCardData[] = results.map(c => ({
+        contactId: c.id || '',
+        name: c.nameZh || c.nameEn || '未知',
+        company: c.company || '',
+        title: c.title || '',
+        score: c.score ?? 0,
+        category: c.category || '',
+        status: c.status || '',
+        source: c.source || '',
+        lastNote: c.notes?.length ? stripNoteTimestamp(c.notes[c.notes.length - 1]) : '',
+        mobile: c.mobile || '',
+        officePhone: c.officePhone || '',
+      }))
+
+      await pushFlex(lineUserId, contactCarousel(cards))
+      const names = cards.map(c => c.name).join('、')
+      return `已送出 ${cards.length} 張卡片：${names}。卡片已經顯示完整資料與操作按鈕，你的回覆不要再重複列一次這些人的細節，簡短一句話即可。`
+    },
+
+    async start_expo_mode({ source }) {
+      const current = await getExpoMode(lineUserId)
+      await startExpoMode(lineUserId, source)
+      const switched = current && current.source !== source
+        ? `（原本的「${current.source}」已結束，共掃了 ${current.scanned} 張）\n`
+        : ''
+      return `${switched}已開啟展場模式：${source}。接下來掃的名片都會自動記在這個場合，回覆只會顯示一行進度。結束時說「結束展場模式」。`
+    },
+
+    async end_expo_mode() {
+      const ended = await endExpoMode(lineUserId)
+      if (!ended) return '目前沒有在展場模式。'
+      return `展場模式已結束。這場「${ended.source}」總共掃了 ${ended.scanned} 張名片。`
+    },
+
+    async get_expo_status() {
+      const mode = await getExpoMode(lineUserId)
+      if (!mode) return '目前不在展場模式，掃名片會照平常流程走（自動查日曆判定場合）。'
+      return `展場模式進行中：${mode.source}，已掃 ${mode.scanned} 張。`
+    },
+
     async get_contact_stats() {
       return JSON.stringify(await getContactStats(lineUserId))
     },
@@ -559,11 +657,13 @@ function systemPrompt(): string {
 
 行為準則：
 - 動手前先用工具查證，不要憑空猜測人脈庫內容
+- 使用者要找某個人、或找完之後可能想打電話或跟進時，用 show_contact_cards 送卡片，比純文字清單好用。送完卡片就不要再用文字重複一次卡片上的資料
 - 使用者的口語表達要主動理解意圖：「我剛跟王大明通過電話」= 更新狀態為已聯絡；「幫我約林董下週三三點」= 建立行程
 - 一句話可能包含多個動作（例如「跟王大明聊完了，他想做官網，下週再約」= 更新狀態 + 記筆記），全部都要執行
 - 找不到聯絡人時，告訴使用者最接近的搜尋結果，不要瞎猜
 - 工具回傳「尚未連結 Google 日曆」時，把授權連結完整傳給使用者
 - 掃名片時系統會自動從日曆判定認識場合，使用者說場合記錯了就用 update_contact_source 改
+- 展覽或媒合會這種要連續掃幾十張名片的場合，主動建議開啟展場模式；使用者說要收攤或活動結束就提醒他關掉
 - 回補舊資料一定要兩步：先 preview_source_backfill 把清單給使用者看，等他明確說要，才 apply_source_backfill。絕不可以跳過確認直接寫入
 - 無法確定使用者意圖時，簡短問清楚，不要長篇大論
 

@@ -32,6 +32,12 @@ export async function saveContact(lineUserId: string, card: CardData, cardImageU
   return ref.id
 }
 
+/** 取出這個使用者的所有聯絡人（早報、週報這種要全域盤點的場景用） */
+export async function getAllContacts(lineUserId: string): Promise<Contact[]> {
+  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
+  return snap.docs.map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+}
+
 export async function getPendingFollowUps(lineUserId: string): Promise<Contact[]> {
   const now = Timestamp.now()
   const snap = await db
@@ -108,6 +114,13 @@ export async function searchContacts(lineUserId: string, query: string): Promise
     )
     .sort((a, b) => (b.score || 0) - (a.score || 0))
     .slice(0, 5)
+}
+
+/** 依 id 取單一聯絡人，含擁有權檢查（卡片按鈕帶 contactId 進來時用） */
+export async function getContactById(lineUserId: string, contactId: string): Promise<Contact | null> {
+  const doc = await db.collection('contacts').doc(contactId).get()
+  if (!doc.exists || doc.data()?.lineUserId !== lineUserId) return null
+  return { id: doc.id, ...doc.data() } as Contact
 }
 
 // 依姓名或公司找單一聯絡人（用於狀態更新）
