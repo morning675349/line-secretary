@@ -221,6 +221,20 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
 
 // ── Postback 處理（名片掃描後的快速按鈕，維持固定流程） ──────
 async function handlePostback(data: string, replyToken: string, lineUserId: string) {
+  // 圖文選單按鈕：不需要 AI 判斷的直接在這裡回，省一次 agent 呼叫的費用與等待。
+  // menu:search / menu:expo 的作用只是叫出鍵盤並預填文字，本身不需要任何回覆。
+  if (data === 'menu:scan') {
+    const mode = await getExpoMode(lineUserId)
+    await replyMessage(
+      replyToken,
+      mode
+        ? `📸 展場模式進行中（${mode.source}，已掃 ${mode.scanned} 張）\n直接連續傳名片照片就好，我會自動建檔。`
+        : '📸 直接傳名片照片給我\n可以一次傳多張，我會自動辨識、評分、判斷認識場合並建檔。'
+    )
+    return
+  }
+  if (data === 'menu:search' || data === 'menu:expo') return
+
   // Flex 卡片上的「起草跟進訊息」：轉交 agent，沿用它既有的草稿邏輯與筆記脈絡
   const draftMatch = data.match(/^draft:(\w+)$/)
   if (draftMatch) {

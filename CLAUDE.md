@@ -169,6 +169,35 @@ Hobby 方案函式上限 **60 秒**，寫 `maxDuration = 300` 會被靜默忽略
 
 **Firestore 出錯時故意 fail open**（照常處理），寧可偶爾重複也不要讓去重機制拖垮整個 bot。
 
+## 圖文選單（2026-09-09）
+
+LINE 底部的六格選單，讓常用功能不用打字。三個檔案綁在一起，改一個就要對照另外兩個：
+
+| 檔案 | 負責 |
+|---|---|
+| `scripts/generate-richmenu.py` | 產底圖 `public/richmenu.png`（2500x1686，3 欄 2 列） |
+| `lib/richmenu.ts` | 選單定義與上架流程（areas 座標、按鈕動作） |
+| `app/api/admin/richmenu/route.ts` | 後台密碼保護的上架端點 |
+
+**`CELLS` 的順序必須跟 `areas` 一一對應**（左上到右下），改了一邊沒改另一邊，使用者就會按到錯的功能。
+
+重新上架（改完圖或按鈕後跑這個，會自動建立、上傳底圖、設為預設、刪掉舊選單）：
+
+```
+cd line-secretary
+COOKIE=$(curl -s -i -X POST https://line-secretary-m6ji.vercel.app/api/admin/auth \
+  -H "Content-Type: application/json" \
+  -d "{\"password\":\"$(grep '^ADMIN_PASSWORD=' .env.local | cut -d= -f2- | tr -d '\"')\"}" \
+  | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: //' | cut -d';' -f1)
+curl -s -X POST https://line-secretary-m6ji.vercel.app/api/admin/richmenu -H "Cookie: $COOKIE"
+```
+
+底圖是用 HTTP 從 `public/richmenu.png` 抓的，不是用 fs 讀，因為 serverless 函式不保證讀得到 `public/` 下的檔案。所以**改圖一定要先部署再上架**，順序反了會傳到舊圖。
+
+產圖字型的兩個坑：macOS 沒有 `PingFang.ttc`，中文要用 `/System/Library/Fonts/STHeiti Medium.ttc`；Apple Color Emoji 只吃固定點陣尺寸（20/32/40/48/64/96/160），其他尺寸會丟 `invalid pixel size`，所以固定用 160 算完再縮放。
+
+按鈕分兩類：`message` 型送一句話給 agent 處理（需要查資料的用這個），`postback` 型在 webhook 的 `handlePostback` 直接回覆（`menu:scan`）或只用來叫出鍵盤預填文字（`menu:search`、`menu:expo`），後者省一次 agent 呼叫的費用與等待。
+
 ## 還沒做的
 
 行事曆改期與刪除、真正的「行程前 1 小時」即時推播（Hobby 的 cron 一天只能跑一次，
