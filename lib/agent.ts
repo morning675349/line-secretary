@@ -6,12 +6,20 @@ import {
   updateContactStatus, updateContactField, addContactNote,
   getContactStats, getLatestContact, updateContactSource,
   getContactsNeedingSource, setPendingBackfill, consumePendingBackfill,
+  getContactsBySource, getAllContacts,
   Contact, BackfillItem,
 } from './contact-service'
 import { getExpoMode, startExpoMode, endExpoMode } from './expo-mode'
 import { contactCarousel, ContactCardData } from './flex'
-import { pushFlex } from './line-client'
+import { pushFlex, pushMessage } from './line-client'
 import { stripNoteTimestamp } from './meeting-intel'
+import { buildExpoReport, rankExpoContacts, tierOf } from './expo-report'
+import type { ExpoContactLite } from './expo-report'
+import { draftFollowups, MAX_DRAFTS_PER_BATCH } from './drafts'
+import type { DraftTarget } from './drafts'
+import { buildNewsleopardCsv, buildFullCsv } from './csv'
+import type { ExportRow } from './csv'
+import { uploadExportCsv } from './storage'
 import {
   createCalendarEvent, listEvents, isCalendarConnected, getAuthUrl,
   fetchEventsOnDate, pickBestEvent, taipeiDate,
@@ -362,7 +370,90 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_expo_report',
+      description: '產出某個場合的展後戰果報告：名片分級統計、現場聊過幾位、DobBiz 潛力、產業分佈、建議跟進順序。使用者說「五金展戰果」「這場收穫如何」「展場報告」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: '場合名稱，例如「五金展」。可只給關鍵字，會用包含比對。' },
+        },
+        required: ['source'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'draft_batch_followups',
+      description: '批次起草跟進訊息並直接傳給使用者，一次最多 5 封。會優先挑現場聊過、評分高的人。使用者說「把五金展的名單各寫一封跟進訊息」「幫這些人寫跟進」時用這個。使用者說「再寫幾封」時把 skip 往後加。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: '場合名稱，例如「五金展」' },
+          tier: { type: 'string', enum: ['A', 'B', 'C', '全部'], description: 'A=評分8以上，B=6到7，C=5以下，全部=不分級' },
+          skip: { type: 'string', description: '跳過前幾位（分批用）。第一次填 0，使用者說再寫幾封就填已寫過的數量。' },
+        },
+        required: ['source', 'tier', 'skip'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'export_contacts',
+      description: '把名單匯出成 CSV 並回傳下載連結（7 天有效）。使用者說「匯出五金展名單」「給我電子豹可以匯入的名單」「B級以下的丟EDM」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: '場合名稱；留空字串表示匯出全部聯絡人' },
+          format: { type: 'string', enum: ['newsleopard', 'full'], description: 'newsleopard=電子豹寄開發信用，只含有 Email 的人；full=完整備份，含筆記' },
+          tier: { type: 'string', enum: ['A', 'B', 'C', 'BC', '全部'], description: '只匯出某個分級。A=評分8以上，B=6到7，C=5以下，BC=B與C合併（高分自己跟、其餘走EDM時用），全部=不分級' },
+        },
+        required: ['source', 'format', 'tier'],
+        additionalProperties: false,
+      },
+    },
+  },
 ]
+
+// 把 Contact 轉成戰果報告用的精簡結構
+function toExpoLite(c: Contact): ExpoContactLite {
+  return {
+    id: c.id || '',
+    name: c.nameZh || c.nameEn || '未知',
+    company: c.company || '',
+    score: c.score ?? 0,
+    industry: c.industry || '',
+    isDobBizPotential: !!c.isDobBizPotential,
+    noteCount: c.notes?.length ?? 0,
+    hasEmail: !!(c.email && c.email.includes('@')),
+  }
+}
+
+// 把 Contact 轉成匯出用的一列
+function toExportRow(c: Contact): ExportRow {
+  return {
+    email: c.email || '',
+    name: c.nameZh || c.nameEn || '未知',
+    company: c.company || '',
+    title: c.title || '',
+    industry: c.industry || '',
+    source: c.source || '',
+    mobile: c.mobile || c.officePhone || '',
+    score: c.score ?? 0,
+    category: c.category || '',
+    status: c.status || '',
+    notes: (c.notes || []).map(stripNoteTimestamp),
+  }
+}
 
 // ── 工具實作（綁定 lineUserId，確保只能存取自己的資料）──────
 type ToolArgs = Record<string, string>
@@ -536,7 +627,13 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
     async end_expo_mode() {
       const ended = await endExpoMode(lineUserId)
       if (!ended) return '目前沒有在展場模式。'
-      return `展場模式已結束。這場「${ended.source}」總共掃了 ${ended.scanned} 張名片。`
+
+      // 收攤當下就把戰果報告推出去。展場的價值在收完名片之後才開始兌現，
+      // 等使用者自己想到要問，熱度已經過了。
+      const contacts = await getContactsBySource(lineUserId, ended.source)
+      await pushMessage(lineUserId, buildExpoReport(ended.source, contacts.map(toExpoLite)))
+
+      return `展場模式已結束，這場「${ended.source}」掃了 ${ended.scanned} 張名片，戰果報告已送出。報告內容已完整呈現給使用者，你的回覆一句話帶過即可，不要重複列出細節。`
     },
 
     async get_expo_status() {
@@ -622,6 +719,100 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       )
       return `行程已建立成功。日曆連結：${link}`
     },
+
+    async get_expo_report({ source }) {
+      const contacts = await getContactsBySource(lineUserId, source)
+      await pushMessage(lineUserId, buildExpoReport(source, contacts.map(toExpoLite)))
+      return `已送出「${source}」的戰果報告（${contacts.length} 張名片）。報告內容已完整呈現給使用者，你的回覆一句話帶過即可，不要重複列出細節。`
+    },
+
+    async draft_batch_followups({ source, tier, skip }) {
+      const contacts = await getContactsBySource(lineUserId, source)
+      if (contacts.length === 0) return `找不到「${source}」的聯絡人，沒有對象可以起草。`
+
+      const ranked = rankExpoContacts(contacts.map(toExpoLite))
+      const pool = tier === '全部' ? ranked : ranked.filter(c => tierOf(c.score) === tier)
+      const start = Math.max(0, Number.parseInt(skip, 10) || 0)
+      const batch = pool.slice(start, start + MAX_DRAFTS_PER_BATCH)
+
+      if (batch.length === 0) {
+        return start > 0
+          ? `「${source}」的 ${tier} 級名單已經全部寫完了，總共 ${pool.length} 位。`
+          : `「${source}」裡沒有 ${tier} 級的聯絡人。`
+      }
+
+      const byId = new Map(contacts.map(c => [c.id || '', c]))
+      const targets: DraftTarget[] = batch.map(b => {
+        const c = byId.get(b.id)
+        return {
+          name: b.name,
+          company: c?.company || '',
+          title: c?.title || '',
+          industry: c?.industry || '',
+          source: c?.source || source,
+          isDobBizPotential: !!c?.isDobBizPotential,
+          dobBizNote: c?.dobBizNote || '',
+          followUpSuggestion: c?.followUpSuggestion || '',
+          notes: (c?.notes || []).map(stripNoteTimestamp),
+        }
+      })
+
+      const drafts = await draftFollowups(targets)
+      if (drafts.length === 0) return '草稿生成失敗，請再試一次。'
+
+      // 一人一則分開推播，方便使用者逐則複製貼上
+      for (const d of drafts) {
+        await pushMessage(lineUserId, `✍️ 給 ${d.name}\n\n${d.message}`)
+      }
+
+      const done = start + batch.length
+      const remain = pool.length - done
+      return `已送出 ${drafts.length} 則草稿給使用者（${tier} 級第 ${start + 1} 到 ${done} 位${remain > 0 ? `，還剩 ${remain} 位` : '，已全部寫完'}）。草稿內容已經顯示，你的回覆只要簡短說明進度即可，不要重複貼草稿內容。${remain > 0 ? `使用者說「再寫」時，skip 填 ${done}。` : ''}`
+    },
+
+    async export_contacts({ source, format, tier }) {
+      const all = source.trim()
+        ? await getContactsBySource(lineUserId, source)
+        : await getAllContacts(lineUserId)
+      if (all.length === 0) return `找不到「${source.trim() || '全部聯絡人'}」的聯絡人，沒有名單可以匯出。`
+
+      // 分級切分：高分的自己打電話跟，其餘的丟 EDM，這是使用者實際的工作方式
+      const inTier = (score: number) =>
+        tier === '全部' ? true : tier === 'BC' ? tierOf(score) !== 'A' : tierOf(score) === tier
+      const contacts = all.filter(c => inTier(c.score ?? 0))
+      const tierLabel = tier === '全部' ? '' : ` ${tier} 級`
+      const label = `${source.trim() || '全部聯絡人'}${tierLabel}`
+      if (contacts.length === 0) return `「${source.trim() || '全部聯絡人'}」裡沒有${tierLabel}的聯絡人。`
+
+      const rows: ExportRow[] = contacts.map(toExportRow)
+      let csv: string
+      let summary: string
+      if (format === 'newsleopard') {
+        const r = buildNewsleopardCsv(rows)
+        if (r.included === 0) return `「${label}」裡沒有任何人留下 Email，無法產出電子豹名單。可以改匯出完整名單（format 填 full）。`
+        csv = r.csv
+        summary = `電子豹名單：${r.included} 位有 Email${r.skipped > 0 ? `，另有 ${r.skipped} 位沒留 Email 已略過` : ''}`
+      } else {
+        csv = buildFullCsv(rows)
+        summary = `完整名單：${rows.length} 位，含筆記與所有欄位`
+      }
+
+      // 簽章網址依賴 Firebase Storage 設定，萬一失敗不能讓使用者在展場當下卡住，
+      // 退而告知後台匯出路徑（那條路徑有登入保護，不會因為降級而外洩名單）。
+      let url: string
+      let expire: string
+      try {
+        const uploaded = await uploadExportCsv(csv, `${label}-${format}`)
+        url = uploaded.url
+        expire = uploaded.expiresAt.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei' })
+      } catch (err) {
+        console.error('Export upload failed:', err)
+        return `名單整理好了（${summary}），但產生下載連結時失敗，可能是 Firebase Storage 設定有問題。請先到後台 /admin/contacts 用「匯出 Excel」取得名單，並把這個錯誤告訴我：${String(err).slice(0, 120)}`
+      }
+
+      await pushMessage(lineUserId, `📥 ${label}\n${summary}\n\n${url}\n\n（連結 ${expire} 前有效，過期跟我說一聲重新產生）`)
+      return `已送出「${label}」的下載連結給使用者。連結已經顯示，你的回覆一句話帶過即可，不要重複貼網址。`
+    },
   }
 }
 
@@ -664,6 +855,10 @@ function systemPrompt(): string {
 - 工具回傳「尚未連結 Google 日曆」時，把授權連結完整傳給使用者
 - 掃名片時系統會自動從日曆判定認識場合，使用者說場合記錯了就用 update_contact_source 改
 - 展覽或媒合會這種要連續掃幾十張名片的場合，主動建議開啟展場模式；使用者說要收攤或活動結束就提醒他關掉
+- 展場模式下使用者傳語音會自動存成最近那張名片的筆記，不會經過你。所以他說「剛剛講的有記到嗎」時，用 get_contact_details 查最近的聯絡人確認就好
+- 收攤（end_expo_mode）會自動送出戰果報告，你不用再另外呼叫 get_expo_report
+- 展後的完整動線是：戰果報告 → 批次起草跟進（draft_batch_followups）→ 匯出名單（export_contacts）。使用者看完報告後，主動提醒他可以接著做這兩件事
+- 批次起草一次五封，寫完若還有剩，主動告訴使用者說「再寫」就能續寫，並記得下次把 skip 往後加
 - 回補舊資料一定要兩步：先 preview_source_backfill 把清單給使用者看，等他明確說要，才 apply_source_backfill。絕不可以跳過確認直接寫入
 - 無法確定使用者意圖時，簡短問清楚，不要長篇大論
 

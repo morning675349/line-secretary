@@ -10,6 +10,7 @@ import {
   pushSourceQuickReply, pushSourceDetected, pushAnalysisWithCorrect,
 } from '@/lib/line-client'
 import { findEventAround, MatchedEvent } from '@/lib/google-calendar'
+import { classifyExpoVoice } from '@/lib/expo-voice'
 import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
 import { uploadCardImage } from '@/lib/storage'
 import { db } from '@/lib/firebase-admin'
@@ -351,8 +352,35 @@ async function handleAudioMessage(messageId: string, replyToken: string, lineUse
     await pushMessage(lineUserId, '⚠️ 聽不清楚這段語音，可以再說一次嗎？')
     return
   }
+
+  // 展場速記：攤位上剛跟人聊完，按住麥克風講一句就該直接變成那張名片的筆記，
+  // 不用先講「筆記 王大明 ...」。分流規則刻意偏向筆記，見 lib/expo-voice.ts。
+  if (await handleExpoVoiceNote(lineUserId, transcript)) return
+
   const answer = await runAgent(lineUserId, transcript)
   await pushMessage(lineUserId, `🎧 你說：「${transcript}」\n\n${answer}`)
+}
+
+/**
+ * 展場模式下把語音當成最近一張名片的筆記。
+ * 回傳 true 表示已處理完畢，呼叫端不要再送去 agent。
+ */
+async function handleExpoVoiceNote(lineUserId: string, transcript: string): Promise<boolean> {
+  const mode = await getExpoMode(lineUserId)
+  if (!mode) return false
+  if (classifyExpoVoice(transcript) === 'command') return false
+
+  const latest = await getLatestContact(lineUserId)
+  // 還沒掃任何名片就講話，沒有對象可以掛，交給 agent 正常回應
+  if (!latest?.id) return false
+
+  await addContactNote(lineUserId, latest.id, transcript)
+  const name = latest.nameZh || latest.nameEn || '最近這張名片'
+  await pushMessage(
+    lineUserId,
+    `📝 已記到 ${name}${latest.company ? `（${latest.company}）` : ''}\n「${transcript}」`
+  )
+  return true
 }
 
 // ── 主入口 ────────────────────────────────────────────────

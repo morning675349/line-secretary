@@ -198,6 +198,51 @@ curl -s -X POST https://line-secretary-m6ji.vercel.app/api/admin/richmenu -H "Co
 
 按鈕分兩類：`message` 型送一句話給 agent 處理（需要查資料的用這個），`postback` 型在 webhook 的 `handlePostback` 直接回覆（`menu:scan`）或只用來叫出鍵盤預填文字（`menu:search`、`menu:expo`），後者省一次 agent 呼叫的費用與等待。
 
+## 展場作戰包（2026-09-30，為 10/20-22 五金展而做）
+
+設攤成本很高，但收完名片之後的轉換動作以前全是手工。這包把「收名片」接到「收單」。
+
+**完整動線**：圖文選單 🎪 → 宣告場合 → 連續掃名片（語音隨手補註記）→ 說「收攤」→ 自動出戰果報告 → 批次起草跟進 → 匯出名單。
+
+### 展場語音速記（`lib/expo-voice.ts`）
+
+展場模式下傳語音，預設直接存成**最近那張名片**的筆記，不經過 agent。
+
+分流規則刻意保守，因為**誤判代價不對稱**：筆記被當指令會直接遺失現場觀察而且你不會發現，指令被當筆記只是多一則垃圾筆記。所以只有整句明顯是指令才判為 command。加規則時請沿用這個原則，不要為了方便放寬成子字串比對（「找時間再約」不可以被當成搜尋指令）。
+
+### 戰果報告（`lib/expo-report.ts`）
+
+排序權重：名片評分 + 現場聊過 3 分 + DobBiz 潛力 2 分 + 有 Email 1 分。
+
+**「現場留過語音筆記」給最高加權是刻意的**，那代表你真的停下來聊過，意願訊號比名片本身的評分更可信；單純路過拿名片不會有筆記。
+
+### 批次起草（`lib/drafts.ts`）
+
+一次 API 呼叫產出整批而不是一人一次，因為 Hobby 上限 60 秒，逐一呼叫五封就會逼近。一批固定 5 封（對齊 LINE 單次推播 5 則上限），續寫時 `skip` 往後加。
+
+草稿會把現場筆記餵進去，所以講得出「你提到想找自動化」這種只有聊過才知道的細節，這是它跟罐頭開發信的差別。
+
+### 名單匯出（`lib/csv.ts` + `uploadExportCsv`）
+
+- `newsleopard`：電子豹匯入用，只收有 Email 的人
+- `full`：完整備份，含筆記
+- 分級 `A / B / C / BC / 全部`，**BC 是給「高分自己打電話、其餘丟 EDM」這個實際工作方式用的**
+
+匯出檔含 64 人的手機與 Email，**不可以像名片圖那樣設成永久公開**，用的是 7 天到期的簽章網址、檔名帶隨機碼。簽章失敗時會降級成「請走後台匯出」而不是改成公開連結。
+
+⚠️ `FIREBASE_STORAGE_BUCKET` 本機沒有，所以**匯出這條路徑無法在本機實測**，只能在正式環境驗。
+
+## 測試檔的型別 import 坑
+
+Node 的 `--experimental-strip-types` 不會把介面從值匯入清單裡移除，所以測試檔引用型別一定要分開寫：
+
+```ts
+import { buildExpoReport } from './expo-report.ts'
+import type { ExpoContactLite } from './expo-report.ts'
+```
+
+混在一起會噴 `does not provide an export named 'ExpoContactLite'`，而且錯誤訊息看起來像模組壞掉，很容易誤判方向。
+
 ## 還沒做的
 
 行事曆改期與刪除、真正的「行程前 1 小時」即時推播（Hobby 的 cron 一天只能跑一次，

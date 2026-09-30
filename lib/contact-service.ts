@@ -202,6 +202,20 @@ export async function consumePendingBackfill(lineUserId: string): Promise<Backfi
   return items
 }
 
+/**
+ * 取出某個場合的所有聯絡人。
+ * 用包含比對而非完全相等，因為日曆事件名可能是「五金展 TiTE x IHT」，
+ * 但使用者口語只會說「五金展」。
+ */
+export async function getContactsBySource(lineUserId: string, source: string): Promise<Contact[]> {
+  const all = await getAllContacts(lineUserId)
+  const q = source.trim().toLowerCase()
+  if (!q) return []
+  return all
+    .filter(c => (c.source || '').toLowerCase().includes(q))
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+}
+
 // 取得最近一筆聯絡人（場合輸入時的 fallback）
 export async function getLatestContact(lineUserId: string): Promise<Contact | null> {
   const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
