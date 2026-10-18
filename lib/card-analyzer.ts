@@ -23,6 +23,7 @@ export interface CardData {
   followUpDays: number
   followUpSuggestion: string
   reasoning: string
+  uncertainFields: string[]
 }
 
 const SYSTEM_PROMPT = `你是一個商業名片 OCR 與 CRM 分析助手。你的任務是：
@@ -106,6 +107,21 @@ DobBiz 雙重標記規則（isDobBizPotential）：
 - followUpSuggestion：具體跟進建議（一句話）
 - reasoning：評分理由（一句話）
 
+- uncertainFields：**誠實列出你沒有十足把握的欄位名稱**（用欄位英文名，例如 ["nameZh","mobile"]）
+
+━━━ 關於 uncertainFields（很重要） ━━━
+這個欄位決定使用者會不會當場發現辨識錯誤。
+展場光線差、角度歪、名片有燙金或藝術字體時，辨識本來就會不準，這不是問題；
+**不講出來才是問題**，因為使用者要等三週後聯絡不到人才發現。
+
+只要符合以下任一條就要列進去，寧可多列不要少列：
+- 人名含罕見字、你是靠上下文猜的、或中英文對不起來
+- 字跡被反光、陰影、摺痕、手指遮到
+- 電話位數看不清楚或可能漏字
+- 公司全名與商標字樣不一致，不確定該用哪個
+
+全部都很確定時填空陣列 []。
+
 未識別的欄位填空字串或空陣列。`
 
 // 名片 JSON 結構（structured outputs 用，保證回傳可解析）
@@ -134,12 +150,13 @@ const CARD_SCHEMA = {
     followUpDays: { type: 'integer' },
     followUpSuggestion: { type: 'string' },
     reasoning: { type: 'string' },
+    uncertainFields: { type: 'array', items: { type: 'string' }, description: '辨識沒有十足把握的欄位名稱' },
   },
   required: [
     'nameZh', 'nameEn', 'company', 'companyEn', 'title', 'titleEn',
     'mobile', 'officePhone', 'fax', 'email', 'address', 'website',
     'services', 'industry', 'companySize', 'score', 'category',
-    'isDobBizPotential', 'dobBizNote', 'followUpDays', 'followUpSuggestion', 'reasoning',
+    'isDobBizPotential', 'dobBizNote', 'followUpDays', 'followUpSuggestion', 'reasoning', 'uncertainFields',
   ],
   additionalProperties: false,
 } as const

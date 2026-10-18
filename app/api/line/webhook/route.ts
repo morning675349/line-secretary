@@ -6,19 +6,19 @@ export const maxDuration = 60
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import {
-  downloadLineImage, replyMessage, pushMessage,
-  pushSourceQuickReply, pushSourceDetected, pushAnalysisWithCorrect,
+  downloadLineImage, replyMessage, pushMessage, pushFlex,
 } from '@/lib/line-client'
 import { findEventAround, MatchedEvent } from '@/lib/google-calendar'
 import { classifyExpoVoice } from '@/lib/expo-voice'
-import { analyzeCard, formatCardReply } from '@/lib/card-analyzer'
+import { scanResultMessage, uncertainLabelsOf } from '@/lib/flex'
+import { analyzeCard } from '@/lib/card-analyzer'
 import { uploadCardImage } from '@/lib/storage'
 import { db } from '@/lib/firebase-admin'
 import {
   saveContact, updateContactSource, updateContactField, addContactNote,
   getContactById, updateContactStatus,
   setPendingSource, consumePendingSource, getLatestContact,
-  setPendingNote, consumePendingNote,
+  consumePendingNote,
   setPendingCorrection, consumePendingCorrection,
 } from '@/lib/contact-service'
 import { runAgent } from '@/lib/agent'
@@ -82,15 +82,6 @@ async function recordSource(lineUserId: string, contactId: string, ev: MatchedEv
   )
 }
 
-function sourceDetectedText(ev: MatchedEvent): string {
-  return [
-    `📍 已記錄場合：${ev.title}`,
-    `🕐 ${ev.when}`,
-    ev.location ? `📌 ${ev.location}` : '',
-    '',
-    '不是這個場合的話，按下面修改。',
-  ].filter(Boolean).join('\n')
-}
 
 // 展場模式下，一次掃幾十張名片，每張回三則訊息會把通知洗爆，
 // 所以改成只回一行進度。時間預算抓在 Vercel Hobby 60 秒上限之前。
@@ -100,7 +91,7 @@ function sourceDetectedText(ev: MatchedEvent): string {
 const BATCH_DEADLINE_MS = 32_000
 const BATCH_CONCURRENCY = 3
 
-type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string }
+type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string; imageUrl: string; source: string }
 
 /** 掃一張名片並建檔，場合優先用展場模式宣告的名稱，其次才問日曆 */
 async function scanCard(
@@ -110,66 +101,85 @@ async function scanCard(
   const card = await analyzeCard(imageBuffer)
   const contactId = await saveContact(lineUserId, card)
 
-  uploadCardImage(imageBuffer, contactId)
-    .then(url => db.collection('contacts').doc(contactId).update({ cardImageUrl: url }))
-    .catch(err => console.error('Card image upload failed:', err))
+  // 縮圖要放進結果卡片讓使用者一眼核對辨識有沒有錯，所以這裡改成等上傳完成
+  // （以前是射後不理）。上傳失敗不能擋住建檔，卡片少一張圖照樣能用。
+  let imageUrl = ''
+  try {
+    imageUrl = await uploadCardImage(imageBuffer, contactId)
+    await db.collection('contacts').doc(contactId).update({ cardImageUrl: imageUrl })
+  } catch (err) {
+    console.error('Card image upload failed:', err)
+  }
 
+  let source = ''
   if (expo) {
     await updateContactSource(lineUserId, contactId, expo.source)
     await addContactNote(lineUserId, contactId, `在「${expo.source}」認識`)
+    source = expo.source
   } else if (matched) {
     await recordSource(lineUserId, contactId, matched)
+    source = matched.title
   }
 
-  return { card, contactId }
+  return { card, contactId, imageUrl, source }
 }
 
 function cardLine(card: ScanResult['card'], index?: number): string {
   const name = card.nameZh || card.nameEn || '未知'
   const company = card.company ? `（${card.company}）` : ''
   const prefix = index === undefined ? '' : `${index}. `
-  return `${prefix}${name}${company} ⭐${card.score}/10 ${card.category}`
+  // 批次摘要沒有名片縮圖可以核對，所以至少要標出哪幾張辨識沒把握，
+  // 否則錯誤會一路沉到展後才被發現
+  const warn = card.uncertainFields?.length ? ' ⚠️' : ''
+  return `${prefix}${name}${company} ⭐${card.score}/10 ${card.category}${warn}`
 }
 
 // ── 名片掃描（單張）────────────────────────────────────────
+/**
+ * 掃名片：一則確認加一張卡片，不再丟出任何需要回答的問題。
+ *
+ * 以前一張名片會送出四則訊息（分析中、結果加修正鈕、問場合、問服務項目），
+ * 其中兩則還在等使用者回答。展場上每張名片要處理四次通知，根本用不下去。
+ *
+ * 卡片上放名片縮圖是關鍵：辨識錯誤真正的代價不是會錯，
+ * 是當下不知道它錯了，等要聯絡時才發現名字是錯的。
+ */
 async function handleImageMessage(messageId: string, replyToken: string, lineUserId: string) {
   const expo = await getExpoMode(lineUserId)
 
-  // 展場模式：極簡回覆，不追問、不逐張確認場合
-  if (expo) {
-    const { card } = await scanCard(messageId, lineUserId, expo, null)
-    const total = await bumpExpoCount(lineUserId)
-    await replyOrPush(replyToken, lineUserId, `📇 第 ${total} 張｜${cardLine(card)}`)
-    return
-  }
+  // 分析要十幾秒，先回一句讓使用者知道有收到，不然會以為沒反應
+  await replyMessage(replyToken, '📷 分析中...')
 
-  await replyMessage(replyToken, '📷 收到名片，分析中...')
-
-  // 從日曆推測認識場合：拍名片的當下通常正在某個活動裡
-  const matched = await findEventAround(lineUserId, new Date())
-  const { card, contactId } = await scanCard(messageId, lineUserId, null, matched)
+  // 展場模式已經宣告場合，不必再查日曆，省一次 API 往返
+  const matched = expo ? null : await findEventAround(lineUserId, new Date())
+  const { card, contactId, imageUrl, source } = await scanCard(messageId, lineUserId, expo, matched)
+  const expoIndex = expo ? await bumpExpoCount(lineUserId) : 0
 
   const followUpDate = new Date()
   followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
-  await pushAnalysisWithCorrect(lineUserId, formatCardReply(card, followUpDate), contactId)
 
-  if (matched) {
-    await pushSourceDetected(lineUserId, contactId, sourceDetectedText(matched))
-  } else {
-    await pushSourceQuickReply(lineUserId, contactId)
-  }
+  const displayName = card.nameZh || card.nameEn || ''
+  await pushFlex(lineUserId, scanResultMessage({
+    contactId,
+    imageUrl,
+    name: displayName,
+    company: card.company || '',
+    title: card.title || '',
+    mobile: card.mobile || card.officePhone || '',
+    email: card.email || '',
+    source,
+    score: card.score ?? 0,
+    category: card.category || '',
+    followUpDate: followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' }),
+    uncertainLabels: uncertainLabelsOf(card.uncertainFields || []),
+    expoIndex,
+  }))
 
   // 讓 agent 的對話記憶知道剛掃了誰，之後「他的電話多少？」接得上
-  const displayName = card.nameZh || card.nameEn || '未知'
   appendSystemNote(
     lineUserId,
-    `剛掃描了一張名片並建檔：${displayName}（${card.company}）${matched ? `，場合是「${matched.title}」` : ''}`
+    `剛掃描了一張名片並建檔：${displayName || '未知'}（${card.company}）${source ? `，場合是「${source}」` : '，場合尚未判定'}`
   ).catch(err => console.error('Conversation note failed:', err))
-
-  if (!card.services || card.services.length === 0) {
-    await setPendingNote(lineUserId, contactId)
-    await pushMessage(lineUserId, `🤔 ${displayName} 的名片沒有服務項目資訊\n你知道他們主要做什麼嗎？直接回覆我，我幫你存進去。`)
-  }
 }
 
 // ── 名片掃描（批次）────────────────────────────────────────
@@ -206,6 +216,8 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
     return
   }
 
+  const uncertainCount = outcome.done.filter(({ result }) => result.card.uncertainFields?.length).length
+
   const lines = [
     `✅ 批次掃描完成！共 ${outcome.done.length} 張名片`,
     ...(outcome.failed.length > 0 ? [`⚠️ ${outcome.failed.length} 張分析失敗`] : []),
@@ -214,7 +226,10 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
     '',
     ...outcome.done.map(({ result }, i) => cardLine(result.card, i + 1)),
     '',
-    matched ? '📌 場合記錯的話跟我說一聲，我幫你改' : '📌 場合資訊與服務項目可至後台補充',
+    ...(uncertainCount > 0
+      ? [`⚠️ 有 ${uncertainCount} 張辨識沒把握（上面標 ⚠️ 的），建議回頭看一下名片原圖`]
+      : []),
+    matched ? '📌 場合記錯的話跟我說一聲，我幫你改' : '📌 這批還沒判定場合，跟我說一聲我幫你補',
   ]
 
   await pushMessage(lineUserId, lines.join('\n'))

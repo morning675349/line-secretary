@@ -28,7 +28,7 @@ const BEFORE_WINDOW = 2 * HOUR // 提早到現場先交換名片
  */
 export function pickBestEvent(events: calendar_v3.Schema$Event[], at: Date): MatchedEvent | null {
   const atDateStr = taipeiDate(at)
-  let best: { score: number; event: MatchedEvent } | null = null
+  let best: { score: number; startMs: number; event: MatchedEvent } | null = null
 
   for (const e of events) {
     if (e.status === 'cancelled') continue
@@ -37,6 +37,7 @@ export function pickBestEvent(events: calendar_v3.Schema$Event[], at: Date): Mat
 
     let score: number
     let when: string
+    let startMs = 0
     let isAllDay = false
 
     if (e.start?.dateTime && e.end?.dateTime) {
@@ -54,6 +55,7 @@ export function pickBestEvent(events: calendar_v3.Schema$Event[], at: Date): Mat
         continue
       }
 
+      startMs = start.getTime()
       when = start.toLocaleString('zh-TW', {
         timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric',
         weekday: 'short', hour: '2-digit', minute: '2-digit',
@@ -70,8 +72,12 @@ export function pickBestEvent(events: calendar_v3.Schema$Event[], at: Date): Mat
       continue
     }
 
-    if (!best || score > best.score) {
-      best = { score, event: { title, location: e.location?.trim() || '', when, isAllDay } }
+    // 同分時取「最晚開始」的那個：兩個行程重疊時，你最近走進去的才是現在人在的場合。
+    // 實例：10/21 早上 BNI 例會 06:30-09:30 與五金展 08:00-18:00 重疊，
+    // 08:30 掃的名片應該算五金展，不是先開始的 BNI。
+    // 反過來也成立：展期中 14:00 的洽談會贏過整天的展覽，因為洽談才是認識對方的場合。
+    if (!best || score > best.score || (score === best.score && startMs > best.startMs)) {
+      best = { score, startMs, event: { title, location: e.location?.trim() || '', when, isAllDay } }
     }
   }
 
