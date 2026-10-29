@@ -159,21 +159,42 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   followUpDate.setDate(followUpDate.getDate() + card.followUpDays)
 
   const displayName = card.nameZh || card.nameEn || ''
-  await pushFlex(lineUserId, scanResultMessage({
-    contactId,
-    imageUrl,
-    name: displayName,
-    company: card.company || '',
-    title: card.title || '',
-    mobile: card.mobile || card.officePhone || '',
-    email: card.email || '',
-    source,
-    score: card.score ?? 0,
-    category: card.category || '',
-    followUpDate: followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' }),
-    uncertainLabels: uncertainLabelsOf(card.uncertainFields || []),
-    expoIndex,
-  }))
+  // Flex 卡片一旦被 LINE 拒收就會丟例外，但名片其實已經建檔成功了，
+  // 不能因為「顯示方式」失敗就讓使用者以為整張掃失敗。
+  // 這裡退回純文字摘要，並把 LINE 的真實錯誤寫進 log 方便追查。
+  try {
+    await pushFlex(lineUserId, scanResultMessage({
+      contactId,
+      imageUrl,
+      name: displayName,
+      company: card.company || '',
+      title: card.title || '',
+      mobile: card.mobile || card.officePhone || '',
+      email: card.email || '',
+      source,
+      score: card.score ?? 0,
+      category: card.category || '',
+      followUpDate: followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' }),
+      uncertainLabels: uncertainLabelsOf(card.uncertainFields || []),
+      expoIndex,
+    }))
+  } catch (err) {
+    console.error('Flex 卡片送出失敗，退回純文字:', err)
+    const followUpStr = followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' })
+    const lines = [
+      expoIndex > 0 ? `📇 第 ${expoIndex} 張` : '✅ 名片已建檔',
+      cardLine(result.card),
+      result.card.title ? `職稱：${result.card.title}` : '',
+      (result.card.mobile || result.card.officePhone) ? `電話：${result.card.mobile || result.card.officePhone}` : '',
+      result.card.email ? `Email：${result.card.email}` : '',
+      result.source ? `場合：${result.source}` : '場合：⚠️ 未判定',
+      expoIndex === 0 ? `跟進：${followUpStr}` : '',
+      uncertainLabelsOf(result.card.uncertainFields || []).length
+        ? `⚠️ 這幾欄沒把握：${uncertainLabelsOf(result.card.uncertainFields || []).join('、')}`
+        : '',
+    ].filter(Boolean)
+    await pushMessage(lineUserId, lines.join('\n'))
+  }
 
   // 讓 agent 的對話記憶知道剛掃了誰，之後「他的電話多少？」接得上
   appendSystemNote(
