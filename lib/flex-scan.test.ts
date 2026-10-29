@@ -77,3 +77,32 @@ test('按鈕的 inputOption 必須是 LINE 列的合法值，寫錯整則訊息�
     assert.ok(VALID_INPUT_OPTIONS.includes(value), `inputOption 不合法：${value}`)
   }
 })
+
+// ── 合併狀態的呈現（2026-10-29 加入去重機制） ──────────────
+
+test('併入既有名片時標頭要講出來，不然使用者以為剛掃的那張不見了', () => {
+  const json = JSON.stringify(scanResultBubble(mk({ mergedChanges: ['補上 email', '併入 1 則筆記'] })))
+  assert.match(json, /已併入既有名片/)
+  assert.doesNotMatch(json, /名片已建檔/, '合併時不可以同時說「已建檔」，兩句話會互相矛盾')
+  assert.match(json, /補上 email/, '要列出改了什麼，否則使用者無法判斷有沒有弄錯')
+})
+
+test('沒有合併時維持原本的已建檔訊息', () => {
+  const json = JSON.stringify(scanResultBubble(mk()))
+  assert.match(json, /名片已建檔/)
+  assert.doesNotMatch(json, /已併入/)
+})
+
+test('手機撞號但姓名不同時給合併按鈕，並寫出是跟誰撞號', () => {
+  const json = JSON.stringify(scanResultBubble(mk({
+    suggestMerge: { contactId: 'oldid1', name: '李小華', company: '測試公司' },
+  })))
+  assert.match(json, /李小華/, '要寫出跟誰撞號，不然使用者無從判斷')
+  assert.match(json, /是同一人，合併/)
+  // primary 必須是既有那筆，順序顛倒會把舊的場合與筆記併進新的那筆
+  assert.match(json, /"merge:oldid1:c1"/)
+})
+
+test('沒有撞號時不出現合併按鈕', () => {
+  assert.doesNotMatch(JSON.stringify(scanResultBubble(mk())), /merge:/)
+})

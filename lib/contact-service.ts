@@ -1,6 +1,8 @@
 import { db } from './firebase-admin'
 import { CardData } from './card-analyzer'
 import { Timestamp, QueryDocumentSnapshot, FieldValue } from 'firebase-admin/firestore'
+import { findMergeTargets, findDuplicateGroups, planMerge } from './contact-merge'
+import type { MergeCandidate, DuplicateGroup } from './contact-merge'
 
 export interface Contact extends CardData {
   id?: string
@@ -11,6 +13,42 @@ export interface Contact extends CardData {
   followUpAt: Timestamp
   createdAt: Timestamp
   cardImageUrl?: string
+  /** 另一張同一人的名片原圖，合併時留下來當核對用的對照 */
+  extraCardImages?: string[]
+  /** 被併進哪一筆。有值就代表這筆已經不是活的，所有查詢都要排除 */
+  mergedInto?: string
+  mergedAt?: Timestamp
+}
+
+/**
+ * 合併時可以「補空缺」的欄位。
+ *
+ * 刻意不含 score、category、followUpDays、status 這些可能被人工調整過的欄位，
+ * 也不含 createdAt。原則是新掃的那張只能補 primary 沒有的東西，不能改它已有的判斷。
+ */
+const MERGE_FILLABLE_FIELDS = [
+  'nameZh', 'nameEn', 'company', 'companyEn', 'title', 'titleEn',
+  'mobile', 'officePhone', 'fax', 'email', 'address', 'website',
+  'services', 'industry', 'companySize', 'dobBizNote', 'followUpSuggestion',
+  'cardImageUrl',
+]
+
+/**
+ * 所有「撈整份名單」的查詢都要走這裡。
+ *
+ * 合併後的筆必須排除，否則匯出名單會重複寄信、統計會多算。
+ * 集中在一處是刻意的：讓每個查詢各自寫排除條件，漏掉一處就會有已合併的
+ * 名片在某個畫面上冒出來，而且很難發現是哪一個查詢漏了。
+ *
+ * 用記憶體過濾而不是 where 條件，因為 Firestore 的 where 不會命中
+ * 「欄位不存在」的文件（合併前建的名片都沒有 mergedInto 這個欄位），
+ * 而且加了 where 就會需要複合索引（見 CLAUDE.md 的資料層地雷）。
+ */
+async function fetchUserContacts(lineUserId: string): Promise<Contact[]> {
+  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
+  return snap.docs
+    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+    .filter(c => !c.mergedInto)
 }
 
 export async function saveContact(lineUserId: string, card: CardData, cardImageUrl?: string): Promise<string> {
@@ -34,19 +72,12 @@ export async function saveContact(lineUserId: string, card: CardData, cardImageU
 
 /** 取出這個使用者的所有聯絡人（早報、週報這種要全域盤點的場景用） */
 export async function getAllContacts(lineUserId: string): Promise<Contact[]> {
-  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
-  return snap.docs.map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  return fetchUserContacts(lineUserId)
 }
 
 export async function getPendingFollowUps(lineUserId: string): Promise<Contact[]> {
   const now = Timestamp.now()
-  const snap = await db
-    .collection('contacts')
-    .where('lineUserId', '==', lineUserId)
-    .get()
-
-  return snap.docs
-    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  return (await fetchUserContacts(lineUserId))
     .filter(c => c.status === '待跟進' && c.followUpAt && c.followUpAt <= now)
     .sort((a, b) => a.followUpAt.seconds - b.followUpAt.seconds)
     .slice(0, 5)
@@ -94,12 +125,7 @@ export async function addContactNote(lineUserId: string, contactId: string, note
 
 // 搜尋聯絡人（支援模糊匹配姓名/公司）
 export async function searchContacts(lineUserId: string, query: string): Promise<Contact[]> {
-  const snap = await db
-    .collection('contacts')
-    .where('lineUserId', '==', lineUserId)
-    .get()
-
-  const contacts = snap.docs.map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  const contacts = await fetchUserContacts(lineUserId)
   const q = query.toLowerCase()
   return contacts
     .filter(
@@ -116,11 +142,25 @@ export async function searchContacts(lineUserId: string, query: string): Promise
     .slice(0, 5)
 }
 
-/** 依 id 取單一聯絡人，含擁有權檢查（卡片按鈕帶 contactId 進來時用） */
-export async function getContactById(lineUserId: string, contactId: string): Promise<Contact | null> {
+/** 不跟合併指標走的原始讀取，合併流程自己要看被併掉的那筆時用 */
+async function getContactRaw(lineUserId: string, contactId: string): Promise<Contact | null> {
   const doc = await db.collection('contacts').doc(contactId).get()
   if (!doc.exists || doc.data()?.lineUserId !== lineUserId) return null
   return { id: doc.id, ...doc.data() } as Contact
+}
+
+/**
+ * 依 id 取單一聯絡人，含擁有權檢查（卡片按鈕帶 contactId 進來時用）。
+ *
+ * 會跟著 mergedInto 走一層。合併之前送出的卡片還留在對話記錄裡，
+ * 使用者幾天後翻上去按「標記已聯絡」時，要改到活著的那筆，不是已被併掉的那筆。
+ * 只走一層就夠：合併一律併進最早建檔的那筆，不會形成鏈。
+ */
+export async function getContactById(lineUserId: string, contactId: string): Promise<Contact | null> {
+  const first = await getContactRaw(lineUserId, contactId)
+  if (!first) return null
+  if (!first.mergedInto) return first
+  return getContactRaw(lineUserId, first.mergedInto)
 }
 
 // 依姓名或公司找單一聯絡人（用於狀態更新）
@@ -183,9 +223,7 @@ export interface BackfillItem {
 
 /** 找出場合還沒填實的聯絡人（預設值「其他」或空白） */
 export async function getContactsNeedingSource(lineUserId: string): Promise<Contact[]> {
-  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
-  return snap.docs
-    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  return (await fetchUserContacts(lineUserId))
     .filter(c => !c.source || c.source === '其他')
     .sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))
 }
@@ -218,9 +256,7 @@ export async function getContactsBySource(lineUserId: string, source: string): P
 
 // 取得最近一筆聯絡人（場合輸入時的 fallback）
 export async function getLatestContact(lineUserId: string): Promise<Contact | null> {
-  const snap = await db.collection('contacts').where('lineUserId', '==', lineUserId).get()
-  const contacts = snap.docs
-    .map((d: QueryDocumentSnapshot) => ({ id: d.id, ...d.data() } as Contact))
+  const contacts = (await fetchUserContacts(lineUserId))
     .sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))
   return contacts[0] || null
 }
@@ -236,12 +272,7 @@ export interface ContactStats {
 }
 
 export async function getContactStats(lineUserId: string): Promise<ContactStats> {
-  const snap = await db
-    .collection('contacts')
-    .where('lineUserId', '==', lineUserId)
-    .get()
-
-  const contacts = snap.docs.map((d: QueryDocumentSnapshot) => d.data() as Contact)
+  const contacts = await fetchUserContacts(lineUserId)
 
   const oneWeekAgo = new Date()
   oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
@@ -265,4 +296,119 @@ export async function getContactStats(lineUserId: string): Promise<ContactStats>
   }
 
   return stats
+}
+
+// ── 名片合併 ──────────────────────────────────────────────
+//
+// 規則與判斷邏輯在 lib/contact-merge.ts（純函式，有測試）。
+// 這一層只負責讀寫 Firestore。
+//
+// 合併一律是「軟刪除」：被併掉的那筆留在資料庫，加上 mergedInto 指向主檔。
+// 比照 lib/deal-service.ts 的 voided 做法。判斷錯了要還原得回來，
+// 而且名片原圖與當初的筆記都還在。
+
+/** 新掃的名片要不要併進既有的某一筆 */
+export async function findMergeForNewCard(
+  lineUserId: string,
+  card: CardData
+): Promise<{ auto: Contact | null; suggest: Contact[] }> {
+  const existing = await fetchUserContacts(lineUserId)
+  const incoming: MergeCandidate = {
+    nameZh: card.nameZh, nameEn: card.nameEn, company: card.company,
+    mobile: card.mobile, officePhone: card.officePhone,
+  }
+  const { auto, suggest } = findMergeTargets(incoming, existing as MergeCandidate[])
+  return { auto: (auto as Contact) || null, suggest: suggest as Contact[] }
+}
+
+export interface MergeResult {
+  ok: boolean
+  changes: string[]
+  /** 合併後活著的那筆 id */
+  survivingId: string
+  reason?: string
+}
+
+/**
+ * 把 secondaryId 併進 primaryId。
+ *
+ * 兩筆都要通過擁有權檢查，因為 contactId 是從 postback 進來的使用者輸入，
+ * 少檢查一邊就等於開了一個可以改別人資料的洞（IDOR）。
+ */
+export async function mergeContactPair(
+  lineUserId: string,
+  primaryId: string,
+  secondaryId: string
+): Promise<MergeResult> {
+  if (primaryId === secondaryId) {
+    return { ok: false, changes: [], survivingId: primaryId, reason: '同一筆名片' }
+  }
+  const [primary, secondary] = await Promise.all([
+    getContactRaw(lineUserId, primaryId),
+    getContactRaw(lineUserId, secondaryId),
+  ])
+  if (!primary || !secondary) {
+    return { ok: false, changes: [], survivingId: primaryId, reason: '找不到名片' }
+  }
+  if (secondary.mergedInto) {
+    return { ok: false, changes: [], survivingId: primaryId, reason: '這筆已經合併過了' }
+  }
+  if (primary.mergedInto) {
+    return { ok: false, changes: [], survivingId: primary.mergedInto, reason: '主檔已經被併到別筆' }
+  }
+
+  const { updates, changes } = planMerge(
+    primary as never,
+    secondary as never,
+    MERGE_FILLABLE_FIELDS
+  )
+
+  if (Object.keys(updates).length) {
+    await db.collection('contacts').doc(primaryId).update(updates)
+  }
+  await db.collection('contacts').doc(secondaryId).update({
+    mergedInto: primaryId,
+    mergedAt: Timestamp.now(),
+  })
+
+  return { ok: true, changes, survivingId: primaryId }
+}
+
+/** 還原一次合併，判斷錯的時候用 */
+export async function unmergeContact(lineUserId: string, contactId: string): Promise<boolean> {
+  const doc = await getContactRaw(lineUserId, contactId)
+  if (!doc?.mergedInto) return false
+  await db.collection('contacts').doc(contactId).update({
+    mergedInto: FieldValue.delete(),
+    mergedAt: FieldValue.delete(),
+  })
+  return true
+}
+
+/** 盤點既有名單的重複組合，給「預覽後確認」的第一段用 */
+export async function previewDuplicates(lineUserId: string): Promise<DuplicateGroup[]> {
+  const all = await fetchUserContacts(lineUserId)
+  return findDuplicateGroups(all as MergeCandidate[])
+}
+
+export interface PendingMerge {
+  primaryId: string
+  secondaryId: string
+  label: string
+  verdict: 'auto' | 'suggest'
+}
+
+/** 暫存待確認的合併提案，比照 pendingBackfill 的做法 */
+export async function setPendingMerges(lineUserId: string, pairs: PendingMerge[]): Promise<void> {
+  await db.collection('users').doc(lineUserId).set({ pendingMerges: pairs }, { merge: true })
+}
+
+/** 只讀不清掉，因為使用者可能分幾次合併（先處理確定的，再慢慢判斷其他的） */
+export async function getPendingMerges(lineUserId: string): Promise<PendingMerge[]> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  return (doc.data()?.pendingMerges as PendingMerge[] | undefined) || []
+}
+
+export async function clearPendingMerges(lineUserId: string): Promise<void> {
+  await db.collection('users').doc(lineUserId).update({ pendingMerges: FieldValue.delete() })
 }

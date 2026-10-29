@@ -40,7 +40,7 @@ Vercel team `wcmep-s-projects` 底下有三個容易搞混的專案：
 
 已從 regex 指令比對改成 tool-calling agent。
 
-- `lib/agent.ts`：22 個工具，手動迴圈最多 8 輪
+- `lib/agent.ts`：28 個工具，手動迴圈最多 8 輪
 - `lib/conversation.ts`：對話記憶存 Firestore `conversations`，6 小時或 12 輪
 - `lib/transcribe.ts`：語音訊息走 Whisper 轉文字再進 agent
 - 名片 OCR 改用 vision 加 `json_schema` strict，掃描後的場合與修正按鈕仍走 pending 快速流程
@@ -114,7 +114,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://line-secretary-m6ji.vercel.
 
 `npm test`（Node 內建 test runner 加 `--experimental-strip-types`，不需額外依賴）。
 
-共 64 項，涵蓋 `event-matching`、`meeting-intel`、`weekly-report`、`batch`、`flex`、`business-progress`、`posting-schedule`。
+共 121 項，涵蓋 `event-matching`、`meeting-intel`、`weekly-report`、`batch`、`flex`、`flex-scan`、`business-progress`、`posting-schedule`、`expo-report`、`expo-voice`、`csv`、`contact-merge`。
 
 **這個專案的慣例是：會出錯的判斷邏輯一律抽成零 I/O 的純函式模組再測。**
 碰 Firestore 或外部 API 的那層不寫測試，靠型別檢查與正式環境驗證。
@@ -309,6 +309,53 @@ Next 16 的靜態路徑固定是 `_next/static/immutable/`，**沒有 per-build 
 退而求其次的做法是帶有效 cookie 打新端點看是不是 404，但那只在「這次有新增端點」時管用；同一支端點改內容時兩版的回應會長得一樣，分不出新舊。2026-10-29 就是因為用 401 當訊號，誤判建置成功，實際上建置從頭就失敗（退路程式碼用了不存在的變數 `result`），正式環境跑的一直是舊程式碼。
 
 順帶一提：`npx tsc --noEmit` 在這個 iCloud 專案要跑好幾分鐘，很容易想跳過。**push 之前一定要等它跑完**，Vercel 的建置會抓到同樣的錯，只是你要多等一輪部署才知道。
+
+## 名片去重與合併（2026-10-29）
+
+規則來自實測 113 筆資料，不是憑感覺訂的：
+
+| 條件 | 動作 | 實測命中 |
+|---|---|---|
+| 姓名相同 ＋ 任一電話相同 | 自動合併，不問 | 4 組 |
+| 手機相同 ＋ 姓名不同 | 卡片上給按鈕問使用者 | 4 組 |
+| 只有公司電話相同 | 完全不處理 | 2 組，全部是誤判 |
+
+**最後一條最重要。** 同公司不同人共用總機完全正常，實測那 2 組都是這種情況。把公司電話列入建議會產生永久性的誤判提示，使用者學會忽略提示之後，真正的重複也會被一起忽略掉。`lib/contact-merge.test.ts` 有一條測試專門擋這個，不要為了多抓幾組而放寬。
+
+反過來，兩人共用手機幾乎不可能，所以手機撞號值得問。實測那 4 組裡有 2 組是 OCR 一字之差的同一人，另 2 組從資料上看不出來，所以設計成「建議」而不是自動。
+
+### 為什麼先建檔再合併
+
+`scanCard` 是先 `saveContact` 再呼叫 `mergeContactPair`，不是先查再決定要不要建檔。看起來多繞一步，但換到兩件事：
+
+1. 合併邏輯只有一套（`planMerge`），有測試，不必再寫一條「不建檔」的分支
+2. 被併掉的那筆是軟刪除，**所以那次的辨識結果會留著**。同一個人的名片掃兩次等於做了兩次獨立辨識，之後要核對名字對不對時，那是唯一的對照來源
+
+### 合併的欄位規則
+
+原則是**只補空缺，不覆蓋既有內容**，因為主檔可能已經被人工修正過（改過名字、調過評分、補過場合）。
+
+- 主檔固定取建檔較早的那筆。實測 4 組自動重複，舊的那筆都有真實場合與一則筆記，新的那筆場合是「其他」且沒筆記
+- 場合是「其他」等於沒判定出來，可以被真實場合蓋掉；反過來不行
+- 狀態只能往前（待跟進 → 已聯絡 → 已提案 → 成交 → 引薦完成），不會被新掃的名片退回「待跟進」
+- `score`、`category`、`followUpDays` 不參與合併，可能已人工調過
+- 另一張名片原圖存進 `extraCardImages`
+
+### 查詢一律走 fetchUserContacts
+
+`lib/contact-service.ts` 的 `fetchUserContacts` 是唯一會掃整個 contacts 集合的地方，所有查詢都要經過它，因為它負責排除 `mergedInto` 有值的筆。**不要在別處自己寫 `where('lineUserId', ...)`**，漏掉一處就會有已合併的名片在某個畫面冒出來，而且很難查出是哪個查詢漏了。
+
+用記憶體過濾而不是 `where('mergedInto', '==', null)`：Firestore 的 where 不會命中「欄位不存在」的文件（合併前建的名片都沒有這個欄位），而且加了就要建複合索引。
+
+`getContactById` 會跟著 `mergedInto` 走一層，因為合併前送出的卡片還留在對話記錄裡，使用者幾天後翻上去按按鈕時要改到活著的那筆。
+
+### 舊資料清理是兩段式
+
+`preview_duplicate_contacts` 產生提案存進 `pendingMerges`，使用者確認後才 `apply_duplicate_merges`。比照場合回補的做法，**system prompt 有明確禁止跳過確認**，改動時不要拿掉。
+
+`apply_duplicate_merges` 的 `selection` 可以傳 `auto`（只合併確定的）、`all`、或編號如 `1,3,5`。只處理一部分時提案會留著，可以接著處理剩下的。
+
+合併都可以用 `undo_merge` 還原，被併掉的名片從來沒有真的被刪除。
 
 ## 還沒做的
 

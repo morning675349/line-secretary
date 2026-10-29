@@ -126,6 +126,10 @@ export interface ScanCardData {
   followUpDate: string
   uncertainLabels: string[]
   expoIndex: number
+  /** 併進既有名片時，這次合併改了什麼。有值卡片就顯示「已併入」而不是「已建檔」 */
+  mergedChanges?: string[]
+  /** 手機撞號但姓名不同的既有名片，卡片上給一個「是同一人嗎」的按鈕 */
+  suggestMerge?: { contactId: string; name: string; company: string } | null
 }
 
 // OCR 回報的欄位英文名轉成卡片上看得懂的中文
@@ -159,9 +163,40 @@ export function scanResultBubble(c: ScanCardData) {
     c.expoIndex === 0 && c.followUpDate ? infoRow('跟進', c.followUpDate) : null,
   ].filter(Boolean)
 
+  // 合併過一定要在最上面講出來。
+  // 不講的話使用者會以為「我剛掃的那張不見了」，而名單數量也沒增加，看起來像壞掉。
+  const merged = (c.mergedChanges?.length ?? 0) > 0
   const header = c.expoIndex > 0
-    ? { type: 'text', text: `📇 第 ${c.expoIndex} 張`, size: 'xs', color: '#AAAAAA' }
-    : { type: 'text', text: '✅ 名片已建檔', size: 'xs', color: '#1DB446' }
+    ? { type: 'text', text: merged ? `♻️ 第 ${c.expoIndex} 張｜併入既有` : `📇 第 ${c.expoIndex} 張`,
+        size: 'xs', color: merged ? '#B26A00' : '#AAAAAA' }
+    : { type: 'text', text: merged ? '♻️ 這個人已經有了，已併入既有名片' : '✅ 名片已建檔',
+        size: 'xs', color: merged ? '#B26A00' : '#1DB446' }
+
+  // 合併改了什麼要列出來，否則「已併入」只是一句話，使用者無法判斷有沒有弄錯
+  const mergeBox = merged
+    ? [{
+        type: 'box', layout: 'vertical', margin: 'md', paddingAll: 'sm',
+        backgroundColor: '#EEF6FF', cornerRadius: 'md',
+        contents: [
+          { type: 'text', text: `這次補上：${c.mergedChanges!.join('、')}`,
+            size: 'xxs', color: '#2A5C8A', wrap: true },
+        ],
+      }]
+    : []
+
+  // 手機撞號但姓名不同：不自動合併，因為同公司不同人共用號碼是真的會發生。
+  // 但要在卡片上問，因為現場記憶最清楚的時候判斷最準，隔幾天就想不起來了。
+  const suggestBox = c.suggestMerge
+    ? [{
+        type: 'box', layout: 'vertical', margin: 'md', paddingAll: 'sm',
+        backgroundColor: '#FFF4E5', cornerRadius: 'md',
+        contents: [
+          { type: 'text', text: `⚠️ 手機跟「${clip(c.suggestMerge.name, 12)}」${c.suggestMerge.company ? `（${clip(c.suggestMerge.company, 14)}）` : ''}一樣`,
+            size: 'xs', color: '#B26A00', wrap: true },
+          { type: 'text', text: '同一人就按下方合併，不同人可以不管', size: 'xxs', color: '#B26A00', margin: 'xs' },
+        ],
+      }]
+    : []
 
   // 不確定欄位做成明顯的警示區塊，不是藏在小字裡
   const warning = c.uncertainLabels.length > 0
@@ -212,6 +247,12 @@ export function scanResultBubble(c: ScanCardData) {
     { type: 'button', style: 'link', height: 'sm',
       action: { type: 'postback', label: '📍 改場合', data: `src_other:${c.contactId}`,
                 inputOption: 'openKeyboard', fillInText: '場合名稱：' } },
+    // 合併是把新掃的這筆併進既有那筆，所以 primary 是既有的 id
+    c.suggestMerge
+      ? { type: 'button', style: 'secondary', height: 'sm',
+          action: { type: 'postback', label: '🔗 是同一人，合併',
+                    data: `merge:${c.suggestMerge.contactId}:${c.contactId}` } }
+      : null,
   ].filter(Boolean)
 
   const bubble: Record<string, unknown> = {
@@ -224,6 +265,8 @@ export function scanResultBubble(c: ScanCardData) {
         { type: 'text', text: clip(c.name || '（辨識不出姓名）', 20), weight: 'bold', size: 'lg', wrap: true },
         { type: 'text', text: clip(c.company || '（未填公司）', 30), size: 'sm', color: '#888888', wrap: true },
         ...scoreRow,
+        ...mergeBox,
+        ...suggestBox,
         ...warning,
         ...(rows.length ? [{ type: 'separator', margin: 'md' }] : []),
         ...(rows.length ? [{ type: 'box', layout: 'vertical', margin: 'md', spacing: 'sm', contents: rows }] : []),

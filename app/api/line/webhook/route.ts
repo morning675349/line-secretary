@@ -20,6 +20,7 @@ import {
   setPendingSource, consumePendingSource, getLatestContact,
   consumePendingNote,
   setPendingCorrection, consumePendingCorrection,
+  findMergeForNewCard, mergeContactPair,
 } from '@/lib/contact-service'
 import { runAgent } from '@/lib/agent'
 import { claimEvent } from '@/lib/dedup'
@@ -92,7 +93,16 @@ async function recordSource(lineUserId: string, contactId: string, ev: MatchedEv
 const BATCH_DEADLINE_MS = 32_000
 const BATCH_CONCURRENCY = 3
 
-type ScanResult = { card: Awaited<ReturnType<typeof analyzeCard>>; contactId: string; imageUrl: string; source: string }
+type ScanResult = {
+  card: Awaited<ReturnType<typeof analyzeCard>>
+  contactId: string
+  imageUrl: string
+  source: string
+  /** 併進既有名片時，這筆合併改了什麼。空陣列代表沒有合併 */
+  mergedChanges: string[]
+  /** 手機撞號但姓名不同的既有名片，要問使用者是不是同一人 */
+  suggestMerge: { contactId: string; name: string; company: string } | null
+}
 
 /** 掃一張名片並建檔，場合優先用展場模式宣告的名稱，其次才問日曆 */
 async function scanCard(
@@ -122,17 +132,44 @@ async function scanCard(
     source = matched.title
   }
 
-  return { card, contactId, imageUrl, source }
+  // 去重：姓名與電話都對得上就併進既有那筆，不留兩筆。
+  //
+  // 刻意「先建檔再合併」而不是「先查再決定要不要建檔」：
+  //   1. 合併邏輯只有一套（lib/contact-merge.ts 的 planMerge），有測試，不必再寫一條分支
+  //   2. 被併掉的那筆是軟刪除，所以這次的辨識結果會留著。
+  //      同一個人的名片被掃兩次等於做了兩次獨立辨識，之後要核對名字時這是唯一的對照來源
+  // 代價是資料庫多一筆 mergedInto 的文件，但那正是上面第 2 點想要的東西。
+  const { auto, suggest } = await findMergeForNewCard(lineUserId, card)
+  let mergedChanges: string[] = []
+  let finalId = contactId
+  if (auto?.id) {
+    const result = await mergeContactPair(lineUserId, auto.id, contactId)
+    if (result.ok) {
+      mergedChanges = result.changes
+      finalId = result.survivingId
+      // 合併後卡片上的場合要顯示活著那筆的場合，不是這次掃到的
+      source = auto.source && auto.source !== '其他' ? auto.source : source
+    }
+  }
+
+  const first = suggest[0]
+  const suggestMerge = !auto && first?.id
+    ? { contactId: first.id, name: first.nameZh || first.nameEn || '', company: first.company || '' }
+    : null
+
+  return { card, contactId: finalId, imageUrl, source, mergedChanges, suggestMerge }
 }
 
-function cardLine(card: ScanResult['card'], index?: number): string {
+function cardLine(card: ScanResult['card'], index?: number, merged = false): string {
   const name = card.nameZh || card.nameEn || '未知'
   const company = card.company ? `（${card.company}）` : ''
   const prefix = index === undefined ? '' : `${index}. `
   // 批次摘要沒有名片縮圖可以核對，所以至少要標出哪幾張辨識沒把握，
   // 否則錯誤會一路沉到展後才被發現
   const warn = card.uncertainFields?.length ? ' ⚠️' : ''
-  return `${prefix}${name}${company} ⭐${card.score}/10 ${card.category}${warn}`
+  // 併入既有的也要標，否則使用者數「我掃了 12 張但名單只多 9 筆」會以為掉了三張
+  const mark = merged ? ' ♻️併入' : ''
+  return `${prefix}${name}${company} ⭐${card.score}/10 ${card.category}${warn}${mark}`
 }
 
 // ── 名片掃描（單張）────────────────────────────────────────
@@ -153,7 +190,8 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
 
   // 展場模式已經宣告場合，不必再查日曆，省一次 API 往返
   const matched = expo ? null : await findEventAround(lineUserId, new Date())
-  const { card, contactId, imageUrl, source } = await scanCard(messageId, lineUserId, expo, matched)
+  const { card, contactId, imageUrl, source, mergedChanges, suggestMerge } =
+    await scanCard(messageId, lineUserId, expo, matched)
   const expoIndex = expo ? await bumpExpoCount(lineUserId) : 0
 
   const followUpDate = new Date()
@@ -178,6 +216,8 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
       followUpDate: followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' }),
       uncertainLabels: uncertainLabelsOf(card.uncertainFields || []),
       expoIndex,
+      mergedChanges,
+      suggestMerge,
     }))
   } catch (err) {
     await logError('scan.pushFlex', err, {
@@ -194,7 +234,11 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
     const followUpStr = followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' })
     const uncertain = uncertainLabelsOf(card.uncertainFields || [])
     const lines = [
-      expoIndex > 0 ? `📇 第 ${expoIndex} 張` : '✅ 名片已建檔',
+      mergedChanges.length
+        ? (expoIndex > 0 ? `♻️ 第 ${expoIndex} 張｜併入既有名片` : '♻️ 這個人已經有了，已併入既有名片')
+        : (expoIndex > 0 ? `📇 第 ${expoIndex} 張` : '✅ 名片已建檔'),
+      mergedChanges.length ? `這次補上：${mergedChanges.join('、')}` : '',
+      suggestMerge ? `⚠️ 手機跟「${suggestMerge.name}」一樣，同一人的話跟我說「合併」` : '',
       cardLine(card),
       card.title ? `職稱：${card.title}` : '',
       (card.mobile || card.officePhone) ? `電話：${card.mobile || card.officePhone}` : '',
@@ -209,7 +253,8 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
   // 讓 agent 的對話記憶知道剛掃了誰，之後「他的電話多少？」接得上
   appendSystemNote(
     lineUserId,
-    `剛掃描了一張名片並建檔：${displayName || '未知'}（${card.company}）${source ? `，場合是「${source}」` : '，場合尚未判定'}`
+    `剛掃描了一張名片並${mergedChanges.length ? '併入既有聯絡人' : '建檔'}：` +
+    `${displayName || '未知'}（${card.company}）${source ? `，場合是「${source}」` : '，場合尚未判定'}`
   ).catch(err => console.error('Conversation note failed:', err))
 }
 
@@ -236,7 +281,9 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
 
   if (expo) {
     const total = await bumpExpoCount(lineUserId, outcome.done.length)
+    const mergedInBatch = outcome.done.filter(({ result }) => result.mergedChanges.length > 0).length
     const notes = [
+      ...(mergedInBatch ? [`♻️ ${mergedInBatch} 張是已經有的人，已併入`] : []),
       ...(outcome.failed.length ? [`⚠️ ${outcome.failed.length} 張辨識失敗`] : []),
       ...(outcome.skipped.length ? [`⏳ ${outcome.skipped.length} 張來不及處理，請再傳一次`] : []),
     ]
@@ -248,14 +295,18 @@ async function handleBatchImages(events: { messageId: string; replyToken: string
   }
 
   const uncertainCount = outcome.done.filter(({ result }) => result.card.uncertainFields?.length).length
+  const mergedCount = outcome.done.filter(({ result }) => result.mergedChanges.length > 0).length
+  const suggestCount = outcome.done.filter(({ result }) => result.suggestMerge).length
 
   const lines = [
     `✅ 批次掃描完成！共 ${outcome.done.length} 張名片`,
+    ...(mergedCount > 0 ? [`♻️ ${mergedCount} 張是已經有的人，已併入既有名片`] : []),
+    ...(suggestCount > 0 ? [`❓ ${suggestCount} 張手機跟既有名片撞號但姓名不同，說「檢查重複」我列給你看`] : []),
     ...(outcome.failed.length > 0 ? [`⚠️ ${outcome.failed.length} 張分析失敗`] : []),
     ...(outcome.skipped.length > 0 ? [`⏳ ${outcome.skipped.length} 張因處理時間不足未完成，請再傳一次`] : []),
     ...(matched ? [`📍 場合：${matched.title}（已自動記錄）`] : []),
     '',
-    ...outcome.done.map(({ result }, i) => cardLine(result.card, i + 1)),
+    ...outcome.done.map(({ result }, i) => cardLine(result.card, i + 1, result.mergedChanges.length > 0)),
     '',
     ...(uncertainCount > 0
       ? [`⚠️ 有 ${uncertainCount} 張辨識沒把握（上面標 ⚠️ 的），建議回頭看一下名片原圖`]
@@ -316,6 +367,19 @@ async function handlePostback(data: string, replyToken: string, lineUserId: stri
     const [, source, contactId] = srcMatch
     const ok = await updateContactSource(lineUserId, contactId, source)
     await replyMessage(replyToken, ok ? `✅ 已記錄場合：${source}` : '⚠️ 找不到這筆聯絡人')
+    return
+  }
+
+  // 合併：primary 是既有那筆（較早建檔），secondary 是剛掃的這筆
+  const mergeMatch = data.match(/^merge:(\w+):(\w+)$/)
+  if (mergeMatch) {
+    const result = await mergeContactPair(lineUserId, mergeMatch[1], mergeMatch[2])
+    await replyMessage(
+      replyToken,
+      result.ok
+        ? `♻️ 已合併成一筆${result.changes.length ? `\n這次補上：${result.changes.join('、')}` : '\n兩筆內容相同，沒有需要補的欄位'}`
+        : `⚠️ 合併沒有完成：${result.reason || '未知原因'}`
+    )
     return
   }
 

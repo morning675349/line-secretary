@@ -7,8 +7,11 @@ import {
   getContactStats, getLatestContact, updateContactSource,
   getContactsNeedingSource, setPendingBackfill, consumePendingBackfill,
   getContactsBySource, getAllContacts,
+  previewDuplicates, setPendingMerges, getPendingMerges, clearPendingMerges,
+  mergeContactPair, unmergeContact,
   Contact, BackfillItem,
 } from './contact-service'
+import { describeGroup } from './contact-merge'
 import { getExpoMode, startExpoMode, endExpoMode } from './expo-mode'
 import { contactCarousel, ContactCardData } from './flex'
 import { pushFlex, pushMessage } from './line-client'
@@ -191,6 +194,45 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       description: '把上一步 preview_source_backfill 的提案正式寫入資料庫。只有在使用者明確表示確認、要、好、寫入之後才可以呼叫。',
       strict: true,
       parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'preview_duplicate_contacts',
+      description: '盤點重複的名片：姓名與電話都相同的算確定同一人，手機相同但姓名不同的要使用者判斷。只產生提案不寫入。使用者說「檢查重複」「有沒有重複的名片」「清一下重複」時用這個。',
+      strict: true,
+      parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'apply_duplicate_merges',
+      description: '把 preview_duplicate_contacts 列出的重複正式合併。只有在使用者明確說要合併之後才可以呼叫。selection 傳「auto」只合併確定同一人的那幾組，「all」全部合併，或逗號分隔的編號例如「1,3,5」只合併指定的幾組。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          selection: { type: 'string', description: '「auto」、「all」，或逗號分隔的編號如「1,3」' },
+        },
+        required: ['selection'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'undo_merge',
+      description: '還原一次合併，把被併掉的那筆救回來。使用者說「合併錯了」「還原」「那不是同一個人」時用這個。需要被併掉那筆的聯絡人 id，可以從 preview_duplicate_contacts 的結果拿到。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: { contactId: { type: 'string', description: '被併掉那筆的聯絡人 id' } },
+        required: ['contactId'],
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -592,6 +634,85 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       return `已回補 ${applied} 筆聯絡人的認識場合。`
     },
 
+    async preview_duplicate_contacts() {
+      const groups = await previewDuplicates(lineUserId)
+      if (groups.length === 0) {
+        await setPendingMerges(lineUserId, [])
+        return '沒有重複的名片，名單是乾淨的。'
+      }
+
+      const pairs = groups
+        .filter(g => g.primary.id && g.secondary.id)
+        .map(g => ({
+          primaryId: g.primary.id!,
+          secondaryId: g.secondary.id!,
+          label: describeGroup(g),
+          verdict: g.verdict,
+        }))
+      await setPendingMerges(lineUserId, pairs)
+
+      const autoCount = pairs.filter(p => p.verdict === 'auto').length
+      const suggestCount = pairs.length - autoCount
+      const numbered = pairs.map((p, i) => `${i + 1}. ${p.label}`).join('\n')
+
+      return [
+        `找到 ${pairs.length} 組重複（尚未合併，等使用者確認）：`,
+        numbered,
+        '',
+        autoCount > 0 ? `其中 ${autoCount} 組姓名與電話都相同，確定是同一人。` : '',
+        suggestCount > 0 ? `另外 ${suggestCount} 組手機相同但姓名不同，可能是辨識錯字，也可能真的是兩個人共用號碼，需要使用者判斷。` : '',
+        '',
+        '請把這份清單原樣列給使用者，說明哪幾組確定、哪幾組要他判斷，並問他要合併哪些。',
+        '使用者確認後才呼叫 apply_duplicate_merges：只要確定的那幾組傳 auto，全部傳 all，指定幾組就傳編號。',
+      ].filter(Boolean).join('\n')
+    },
+
+    async apply_duplicate_merges({ selection }) {
+      const pairs = await getPendingMerges(lineUserId)
+      if (!pairs.length) return '沒有待確認的合併提案，請先執行 preview_duplicate_contacts。'
+
+      const pick = (selection || '').trim().toLowerCase()
+      let chosen: typeof pairs
+      if (pick === 'auto') {
+        chosen = pairs.filter(p => p.verdict === 'auto')
+      } else if (pick === 'all') {
+        chosen = pairs
+      } else {
+        const idx = new Set(
+          pick.split(/[,，\s]+/).map(n => Number(n.trim())).filter(n => Number.isInteger(n) && n >= 1)
+        )
+        chosen = pairs.filter((_, i) => idx.has(i + 1))
+      }
+      if (!chosen.length) return `selection「${selection}」沒有對應到任何一組，請確認編號。`
+
+      const done: string[] = []
+      const failed: string[] = []
+      for (const p of chosen) {
+        const r = await mergeContactPair(lineUserId, p.primaryId, p.secondaryId)
+        if (r.ok) done.push(`${p.label}${r.changes.length ? `（${r.changes.join('、')}）` : '（內容相同，無欄位需要補）'}`)
+        else failed.push(`${p.label}：${r.reason || '未知原因'}`)
+      }
+
+      // 全部處理完才清掉提案；只處理一部分時留著，使用者可以接著處理剩下的
+      const remaining = pairs.length - chosen.length
+      if (remaining === 0) await clearPendingMerges(lineUserId)
+
+      return [
+        `已合併 ${done.length} 組：`,
+        ...done.map(d => `・${d}`),
+        failed.length ? `\n有 ${failed.length} 組沒成功：\n${failed.map(f => `・${f}`).join('\n')}` : '',
+        remaining > 0 ? `\n還有 ${remaining} 組沒處理，要繼續的話說一聲。` : '',
+        '\n合併錯了可以說「還原」，被併掉的名片都留著沒有刪除。',
+      ].filter(Boolean).join('\n')
+    },
+
+    async undo_merge({ contactId }) {
+      const ok = await unmergeContact(lineUserId, contactId)
+      return ok
+        ? '已還原，那筆名片又回到名單裡了。'
+        : '找不到這筆合併紀錄，可能 id 不對，或者那筆本來就沒有被合併。'
+    },
+
     async show_contact_cards({ query }) {
       const results = await searchContacts(lineUserId, query)
       if (results.length === 0) return `找不到「${query}」相關的聯絡人，沒有卡片可以顯示。`
@@ -860,6 +981,8 @@ function systemPrompt(): string {
 - 展後的完整動線是：戰果報告 → 批次起草跟進（draft_batch_followups）→ 匯出名單（export_contacts）。使用者看完報告後，主動提醒他可以接著做這兩件事
 - 批次起草一次五封，寫完若還有剩，主動告訴使用者說「再寫」就能續寫，並記得下次把 skip 往後加
 - 回補舊資料一定要兩步：先 preview_source_backfill 把清單給使用者看，等他明確說要，才 apply_source_backfill。絕不可以跳過確認直接寫入
+- 合併重複名片同樣一定要兩步：先 preview_duplicate_contacts 列清單，等使用者明確說要合併哪些，才 apply_duplicate_merges。絕不可以跳過確認直接合併
+- 掃名片時「姓名與電話都相同」會自動合併，這是刻意的，不需要問。但「手機相同而姓名不同」永遠不自動合併，因為同公司不同人共用號碼是真的會發生
 - 無法確定使用者意圖時，簡短問清楚，不要長篇大論
 
 回覆格式（LINE 純文字）：
