@@ -90,6 +90,13 @@ export async function pushMessageWithQuickReply(
   })
 }
 
+/**
+ * ⚠️ 2026-10-18 改版後已無人呼叫，掃名片結果改用 lib/flex.ts 的卡片。保留只為參考。
+ *
+ * 原本這裡寫 inputOption: 'closeKeyboard'，而 LINE 沒有這個值
+ * （合法值只有 closeRichMenu、openRichMenu、openKeyboard、openVoice），
+ * 寫錯會讓整則訊息被退 400。2026-10-29 就是同一個錯誤值在 Flex 卡片上爆掉。
+ */
 export async function pushAnalysisWithCorrect(userId: string, text: string, contactId: string): Promise<void> {
   await callLineApi('/message/push', {
       to: userId,
@@ -105,7 +112,7 @@ export async function pushAnalysisWithCorrect(userId: string, text: string, cont
                   type: 'postback',
                   label: '✏️ 修正名字',
                   data: `correct_name:${contactId}`,
-                  inputOption: 'closeKeyboard',
+                  inputOption: 'openKeyboard',
                 },
               },
               {
@@ -114,7 +121,7 @@ export async function pushAnalysisWithCorrect(userId: string, text: string, cont
                   type: 'postback',
                   label: '✏️ 修正公司',
                   data: `correct_company:${contactId}`,
-                  inputOption: 'closeKeyboard',
+                  inputOption: 'openKeyboard',
                 },
               },
             ],

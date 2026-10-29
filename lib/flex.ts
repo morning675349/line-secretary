@@ -186,25 +186,32 @@ export function scanResultBubble(c: ScanCardData) {
       }]
     : []
 
-  // ⚠️ Flex 按鈕的 action 不可以帶 inputOption／fillInText。
+  // ⚠️ inputOption 只能用 LINE 列的四個值，寫錯整則訊息被退 400。
   //
-  // 2026-10-29 事故：這張卡片上線後第一次被使用（10/29 11:17）就被 LINE 退件，
-  // 使用者只看到「發生錯誤」。LINE 的驗證端點回的是
+  // 2026-10-29 事故：這張卡片原本寫 inputOption: 'closeKeyboard'，而 LINE 沒有這個值
+  // （合法值只有 closeRichMenu、openRichMenu、openKeyboard、openVoice）。
+  // 卡片 10/18 上線，10/29 第一次真的拿來掃名片就被退件，使用者只看到「發生錯誤」，
+  // 名片其實已經建檔成功了。LINE 回的是
   //   invalid property: /footer/contents/1/action/inputOption
-  // inputOption 與 fillInText 只在「快速回覆」與「圖文選單」的 action 裡合法
-  // （lib/line-client.ts 的 quickReply 與 lib/richmenu.ts 用得好好的，就是這個原因），
-  // Flex 的按鈕不吃。改這裡之前先跑 /api/admin/validate-flex。
+  // 「invalid property」指的是值不合法，不是這個屬性不能用。
+  // 用 /api/admin/validate-flex 的探針確認過：Flex 按鈕吃 inputOption 也吃 fillInText。
+  //
+  // 三個按鈕都用 openKeyboard：按下去鍵盤就跳出來，可以直接打，不必再點一次輸入框。
   const buttons = [
     phone
       ? { type: 'button', style: 'primary', height: 'sm', color: '#1DB446',
           action: { type: 'uri', label: '📞 撥號', uri: telUri(phone) } }
       : null,
     { type: 'button', style: 'secondary', height: 'sm',
-      action: { type: 'postback', label: '✏️ 修正名字', data: `correct_name:${c.contactId}` } },
+      action: { type: 'postback', label: '✏️ 修正名字', data: `correct_name:${c.contactId}`,
+                inputOption: 'openKeyboard' } },
     { type: 'button', style: 'link', height: 'sm',
-      action: { type: 'postback', label: '🏢 修正公司', data: `correct_company:${c.contactId}` } },
+      action: { type: 'postback', label: '🏢 修正公司', data: `correct_company:${c.contactId}`,
+                inputOption: 'openKeyboard' } },
+    // fillInText 的「場合名稱：」前綴由 webhook 的 /^場合名稱：?(.+)$/ 剝掉
     { type: 'button', style: 'link', height: 'sm',
-      action: { type: 'postback', label: '📍 改場合', data: `src_other:${c.contactId}` } },
+      action: { type: 'postback', label: '📍 改場合', data: `src_other:${c.contactId}`,
+                inputOption: 'openKeyboard', fillInText: '場合名稱：' } },
   ].filter(Boolean)
 
   const bubble: Record<string, unknown> = {

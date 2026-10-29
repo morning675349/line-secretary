@@ -61,14 +61,19 @@ test('縮圖完整顯示不裁切，且可點擊看原圖', () => {
 
 // 2026-10-29 事故的回歸測試。
 //
-// 這張卡片原本在三個按鈕上帶了 inputOption（還有一個 fillInText），
-// 而那兩個屬性只在「快速回覆」與「圖文選單」的 action 裡合法，Flex 按鈕不吃。
-// LINE 直接退件，使用者看到的是「發生錯誤」，名片其實已經建好了。
+// 這張卡片原本在按鈕上寫 inputOption: 'closeKeyboard'，而 LINE 沒有這個值。
+// 整則訊息被退 400，使用者只看到「發生錯誤」，名片其實已經建檔成功了。
+// 卡片 10/18 上線，11 天後第一次真的拿它掃名片才爆。
 //
-// 當時的測試只驗 JSON 形狀，驗不到 LINE 的規格，所以整個改版上線十一天都沒人發現，
-// 直到第一次真的拿它掃名片。這條測試擋的就是同一類錯誤再被加回來。
-test('Flex 按鈕的 action 不可帶 inputOption 或 fillInText，LINE 會整則退件', () => {
-  const json = JSON.stringify(scanResultBubble(mk()))
-  assert.doesNotMatch(json, /inputOption/, 'Flex 的 action 不支援 inputOption')
-  assert.doesNotMatch(json, /fillInText/, 'Flex 的 action 不支援 fillInText')
+// 當時的測試只驗 JSON 形狀，驗不到 LINE 的規格。這條測試擋的是同一類錯誤：
+// 不是禁用 inputOption（探針證實 Flex 按鈕吃這個屬性），而是值必須在清單內。
+const VALID_INPUT_OPTIONS = ['closeRichMenu', 'openRichMenu', 'openKeyboard', 'openVoice']
+
+test('按鈕的 inputOption 必須是 LINE 列的合法值，寫錯整則訊息被退 400', () => {
+  const found = JSON.stringify(scanResultBubble(mk())).match(/"inputOption":"([^"]*)"/g) || []
+  assert.ok(found.length > 0, '卡片應該有帶 inputOption 的按鈕，沒有的話這條測試就失去意義')
+  for (const m of found) {
+    const value = m.replace(/^"inputOption":"/, '').replace(/"$/, '')
+    assert.ok(VALID_INPUT_OPTIONS.includes(value), `inputOption 不合法：${value}`)
+  }
 })
