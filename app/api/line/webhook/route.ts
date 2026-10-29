@@ -20,7 +20,7 @@ import {
   setPendingSource, consumePendingSource, getLatestContact,
   consumePendingNote,
   setPendingCorrection, consumePendingCorrection,
-  findMergeForNewCard, mergeContactPair,
+  findMergeForNewCard, mergeContactPair, refreshFollowUp,
 } from '@/lib/contact-service'
 import { runAgent } from '@/lib/agent'
 import { claimEvent } from '@/lib/dedup'
@@ -139,7 +139,7 @@ async function scanCard(
   //   2. 被併掉的那筆是軟刪除，所以這次的辨識結果會留著。
   //      同一個人的名片被掃兩次等於做了兩次獨立辨識，之後要核對名字時這是唯一的對照來源
   // 代價是資料庫多一筆 mergedInto 的文件，但那正是上面第 2 點想要的東西。
-  const { auto, suggest } = await findMergeForNewCard(lineUserId, card)
+  const { auto, suggest } = await findMergeForNewCard(lineUserId, card, contactId)
   let mergedChanges: string[] = []
   let finalId = contactId
   if (auto?.id) {
@@ -149,6 +149,12 @@ async function scanCard(
       finalId = result.survivingId
       // 合併後卡片上的場合要顯示活著那筆的場合，不是這次掃到的
       source = auto.source && auto.source !== '其他' ? auto.source : source
+
+      // 又遇到同一個人，跟進日期要從今天重算。
+      // 不重算的話主檔會留著舊的日期，而卡片顯示的是「今天＋這次建議的天數」，
+      // 兩者對不上；而且剛見過面本來就該重新排跟進。
+      await refreshFollowUp(lineUserId, finalId, card.followUpDays)
+      mergedChanges.push('跟進日期重新排')
     }
   }
 

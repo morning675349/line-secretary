@@ -203,3 +203,22 @@ test('預覽文字要標出哪幾組不用判斷、哪幾組要判斷', () => {
   assert.match(suggest, /王小明/)
   assert.match(suggest, /李小華/)
 })
+
+// 這條擋的是一個會讓功能靜默失效的錯誤。
+//
+// findMergeForNewCard 是在建檔之後呼叫的，候選名單裡包含剛建好的那一筆。
+// 它跟自己姓名電話完全相同，所以如果沒排除，auto 永遠有值，
+// 連帶讓「手機撞號但姓名不同」的建議永遠不會出現（suggest 的條件是沒有 auto）。
+// 功能看起來正常上線，但那顆按鈕一次都不會跑出來。
+test('候選名單含有自己時不可以跟自己配對，否則合併建議永遠不會出現', () => {
+  const self = mk({ id: 'self', nameZh: '王小明', mobile: '0912-345678', createdAt: { seconds: 9999 } })
+  const other = mk({ id: 'other', nameZh: '李小華', mobile: '0912-345678', officePhone: '', createdAt: { seconds: 1000 } })
+
+  // 自己對自己：id 相同就該回 none
+  assert.equal(classify(self, self), 'none')
+
+  // 帶著自己的 id 去找，應該找不到 auto，但要找到 suggest
+  const { auto, suggest } = findMergeTargets(self, [self, other])
+  assert.equal(auto, null, '不可以把自己當成合併對象')
+  assert.deepEqual(suggest.map(c => c.id), ['other'], '排除自己之後建議才會出現')
+})

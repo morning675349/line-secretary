@@ -307,13 +307,22 @@ export async function getContactStats(lineUserId: string): Promise<ContactStats>
 // 比照 lib/deal-service.ts 的 voided 做法。判斷錯了要還原得回來，
 // 而且名片原圖與當初的筆記都還在。
 
-/** 新掃的名片要不要併進既有的某一筆 */
+/**
+ * 新掃的名片要不要併進既有的某一筆。
+ *
+ * selfId 一定要傳，而且一定要排除掉。
+ * 這支是在 saveContact 之後呼叫的，所以候選名單裡包含剛建好的那一筆，
+ * 它跟自己姓名電話完全相同，不排除的話 auto 永遠有值，
+ * 連帶讓「手機撞號但姓名不同」的建議永遠不會出現（suggest 的條件是沒有 auto）。
+ */
 export async function findMergeForNewCard(
   lineUserId: string,
-  card: CardData
+  card: CardData,
+  selfId: string
 ): Promise<{ auto: Contact | null; suggest: Contact[] }> {
-  const existing = await fetchUserContacts(lineUserId)
+  const existing = (await fetchUserContacts(lineUserId)).filter(c => c.id !== selfId)
   const incoming: MergeCandidate = {
+    id: selfId,
     nameZh: card.nameZh, nameEn: card.nameEn, company: card.company,
     mobile: card.mobile, officePhone: card.officePhone,
   }
@@ -411,4 +420,23 @@ export async function getPendingMerges(lineUserId: string): Promise<PendingMerge
 
 export async function clearPendingMerges(lineUserId: string): Promise<void> {
   await db.collection('users').doc(lineUserId).update({ pendingMerges: FieldValue.delete() })
+}
+
+/**
+ * 重排跟進日期。
+ *
+ * 只有「又遇到同一個人」時才該呼叫，也就是掃到重複名片的那一刻。
+ * 舊資料清理（apply_duplicate_merges）不可以用這支，那只是整理資料，
+ * 不代表剛見過面，把跟進日期往後推會讓真正該跟進的人從名單上消失。
+ */
+export async function refreshFollowUp(
+  lineUserId: string,
+  contactId: string,
+  days: number
+): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
+  const followUpAt = new Date()
+  followUpAt.setDate(followUpAt.getDate() + days)
+  await db.collection('contacts').doc(contactId).update({ followUpAt: Timestamp.fromDate(followUpAt) })
+  return true
 }
