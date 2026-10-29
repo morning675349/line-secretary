@@ -93,8 +93,18 @@ export async function GET(req: NextRequest) {
   checks.push(...probes)
 
   const failed = checks.filter(c => !c.ok)
+
+  // 回傳線上跑的是哪個 commit。
+  //
+  // 2026-10-29 這個問題害我誤判兩次：先用 HTTP 401 當「新端點已上線」的訊號
+  // （中介層對 /api/admin 底下不存在的路徑也回 401），後來又發現兩個版本的
+  // 驗證結果會長得一模一樣，分不出讀到新版還是舊版。
+  // Next 16 的靜態路徑固定是 immutable，沒有 per-build ID 可用，
+  // 但 Vercel 會自動注入 VERCEL_GIT_COMMIT_SHA，直接回傳最省事。
+  const commit = (process.env.VERCEL_GIT_COMMIT_SHA || 'local').slice(0, 7)
+
   return NextResponse.json(
-    { ok: failed.length === 0, failedCount: failed.length, checks },
+    { ok: failed.length === 0, commit, failedCount: failed.length, checks },
     { status: failed.length === 0 ? 200 : 422 }
   )
 }

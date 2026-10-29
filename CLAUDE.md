@@ -302,7 +302,11 @@ curl -s "https://line-secretary-m6ji.vercel.app/api/admin/errors?limit=10" -H "C
 
 `middleware.ts` 的 matcher 是 `/api/admin/:path*`，**對這個前綴底下任何路徑都回 401，包含根本不存在的路徑**。所以「打新端點拿到 401 就代表部署好了」是錯的，建置失敗時一樣是 401。
 
-正確做法是**帶有效 cookie 打進去看是不是 404**。2026-10-29 就是因為用 401 當訊號，誤判建置成功，實際上建置從頭就失敗（退路程式碼用了不存在的變數 `result`），正式環境跑的一直是舊程式碼。
+正確做法是**看 `/api/admin/validate-flex` 回傳的 `commit` 欄位**（Vercel 自動注入的 `VERCEL_GIT_COMMIT_SHA` 前 7 碼），對得上你剛推的 commit 才算上線。
+
+Next 16 的靜態路徑固定是 `_next/static/immutable/`，**沒有 per-build ID 可以比對**，別想用那招。
+
+退而求其次的做法是帶有效 cookie 打新端點看是不是 404，但那只在「這次有新增端點」時管用；同一支端點改內容時兩版的回應會長得一樣，分不出新舊。2026-10-29 就是因為用 401 當訊號，誤判建置成功，實際上建置從頭就失敗（退路程式碼用了不存在的變數 `result`），正式環境跑的一直是舊程式碼。
 
 順帶一提：`npx tsc --noEmit` 在這個 iCloud 專案要跑好幾分鐘，很容易想跳過。**push 之前一定要等它跑完**，Vercel 的建置會抓到同樣的錯，只是你要多等一輪部署才知道。
 
