@@ -186,18 +186,25 @@ export function scanResultBubble(c: ScanCardData) {
       }]
     : []
 
+  // ⚠️ Flex 按鈕的 action 不可以帶 inputOption／fillInText。
+  //
+  // 2026-10-29 事故：這張卡片上線後第一次被使用（10/29 11:17）就被 LINE 退件，
+  // 使用者只看到「發生錯誤」。LINE 的驗證端點回的是
+  //   invalid property: /footer/contents/1/action/inputOption
+  // inputOption 與 fillInText 只在「快速回覆」與「圖文選單」的 action 裡合法
+  // （lib/line-client.ts 的 quickReply 與 lib/richmenu.ts 用得好好的，就是這個原因），
+  // Flex 的按鈕不吃。改這裡之前先跑 /api/admin/validate-flex。
   const buttons = [
     phone
       ? { type: 'button', style: 'primary', height: 'sm', color: '#1DB446',
           action: { type: 'uri', label: '📞 撥號', uri: telUri(phone) } }
       : null,
     { type: 'button', style: 'secondary', height: 'sm',
-      action: { type: 'postback', label: '✏️ 修正名字', data: `correct_name:${c.contactId}`, inputOption: 'closeKeyboard' } },
+      action: { type: 'postback', label: '✏️ 修正名字', data: `correct_name:${c.contactId}` } },
     { type: 'button', style: 'link', height: 'sm',
-      action: { type: 'postback', label: '🏢 修正公司', data: `correct_company:${c.contactId}`, inputOption: 'closeKeyboard' } },
+      action: { type: 'postback', label: '🏢 修正公司', data: `correct_company:${c.contactId}` } },
     { type: 'button', style: 'link', height: 'sm',
-      action: { type: 'postback', label: '📍 改場合', data: `src_other:${c.contactId}`,
-                inputOption: 'openKeyboard', fillInText: '場合名稱：' } },
+      action: { type: 'postback', label: '📍 改場合', data: `src_other:${c.contactId}` } },
   ].filter(Boolean)
 
   const bubble: Record<string, unknown> = {

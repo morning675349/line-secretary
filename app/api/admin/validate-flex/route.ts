@@ -65,6 +65,33 @@ export async function GET(req: NextRequest) {
     validate('聯絡人卡片（既有功能，對照組）', contactCarousel([contactSample])),
   ])
 
+  // 探針：確認 Flex 按鈕的 action 到底吃不吃 inputOption／fillInText。
+  // LINE 一則訊息只回報第一個錯誤，所以要一個屬性一張卡片單獨問，才分得出來。
+  // 這也決定「📍 改場合」能不能把鍵盤預填「場合名稱：」救回來。
+  const probeBubble = (action: Record<string, unknown>) => ({
+    type: 'flex',
+    altText: '探針',
+    contents: {
+      type: 'bubble',
+      body: { type: 'box', layout: 'vertical',
+              contents: [{ type: 'text', text: '探針' }] },
+      footer: { type: 'box', layout: 'vertical',
+                contents: [{ type: 'button', style: 'link', height: 'sm', action }] },
+    },
+  })
+
+  const probes = await Promise.all([
+    validate('探針A：postback 不帶任何額外屬性',
+      probeBubble({ type: 'postback', label: '測試', data: 'probe' })),
+    validate('探針B：postback + openKeyboard + fillInText',
+      probeBubble({ type: 'postback', label: '測試', data: 'probe',
+                    inputOption: 'openKeyboard', fillInText: '場合名稱：' })),
+    validate('探針C：postback + closeRichMenu（LINE 文件列的合法值）',
+      probeBubble({ type: 'postback', label: '測試', data: 'probe',
+                    inputOption: 'closeRichMenu' })),
+  ])
+  checks.push(...probes)
+
   const failed = checks.filter(c => !c.ok)
   return NextResponse.json(
     { ok: failed.length === 0, failedCount: failed.length, checks },
