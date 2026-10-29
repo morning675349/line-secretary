@@ -62,6 +62,18 @@ export async function GET(req: NextRequest) {
     validate('掃描卡片（展場模式）', scanResultMessage({ ...sample, expoIndex: 3 })),
     validate('掃描卡片（無不確定欄位）', scanResultMessage({ ...sample, uncertainLabels: [] })),
     validate('掃描卡片（有場合）', scanResultMessage({ ...sample, source: '測試場合' })),
+    // 2026-10-29 加入去重後的兩個新狀態。
+    // 今天出事的原因就是新的卡片狀態沒被 LINE 驗過就上線，不要再犯一次。
+    validate('掃描卡片（併入既有）', scanResultMessage({
+      ...sample, mergedChanges: ['補上 email', '併入 1 則筆記', '跟進日期重新排'],
+    })),
+    validate('掃描卡片（手機撞號建議合併）', scanResultMessage({
+      ...sample,
+      suggestMerge: { contactId: 'testcontact2', name: '測試姓名乙', company: '測試乙公司' },
+    })),
+    validate('掃描卡片（併入＋展場模式）', scanResultMessage({
+      ...sample, expoIndex: 5, mergedChanges: ['補上 Email'],
+    })),
     validate('聯絡人卡片（既有功能，對照組）', contactCarousel([contactSample])),
   ])
 
