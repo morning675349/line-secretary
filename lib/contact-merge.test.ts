@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert'
 import {
   phoneKey, nameKey, isMobileKey, classify,
-  findMergeTargets, findDuplicateGroups, planMerge, describeGroup,
+  findMergeTargets, findDuplicateGroups, planMerge, describeGroup, pairKey,
 } from './contact-merge.ts'
 import type { MergeCandidate } from './contact-merge.ts'
 
@@ -221,4 +221,9 @@ test('候選名單含有自己時不可以跟自己配對，否則合併建議�
   const { auto, suggest } = findMergeTargets(self, [self, other])
   assert.equal(auto, null, '不可以把自己當成合併對象')
   assert.deepEqual(suggest.map(c => c.id), ['other'], '排除自己之後建議才會出現')
+})
+
+test('配對鍵跟順序無關，使用者排除過的組合不可以再問第二次', () => {
+  assert.equal(pairKey('aaa', 'bbb'), pairKey('bbb', 'aaa'))
+  assert.notEqual(pairKey('aaa', 'bbb'), pairKey('aaa', 'ccc'))
 })

@@ -238,3 +238,14 @@ export function describeGroup(g: DuplicateGroup): string {
   return `${tag}　${name(g.primary)}（${when(g.primary)}）＋ ${name(g.secondary)}（${when(g.secondary)}）` +
          `${g.primary.company ? `｜${g.primary.company}` : ''}${phone ? `｜${phone}` : ''}`
 }
+
+/**
+ * 一組配對的穩定鍵，用來記住「使用者說過這兩筆不是同一人」。
+ *
+ * 必須跟順序無關：同一組在不同次盤點裡，誰是 primary 可能因為資料被改過而互換，
+ * 如果鍵跟順序有關，使用者排除過的組合會再冒出來問第二次。
+ * 被問第二次的提示等於沒有記憶，使用者會開始忽略所有提示。
+ */
+export function pairKey(idA: string, idB: string): string {
+  return [idA, idB].sort().join('|')
+}

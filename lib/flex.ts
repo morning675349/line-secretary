@@ -303,3 +303,117 @@ export function scanResultMessage(c: ScanCardData) {
     contents: scanResultBubble(c),
   }
 }
+
+// ── 重複名片卡片（2026-10-29） ───────────────────────────────
+//
+// 原本「檢查重複」是回一段文字，要使用者打「合併 1,2,5」。
+// 編號跟人名的對應要自己在腦中維持，而且判斷錯了只能重打一次。
+// 一組一張卡片，兩顆按鈕按完就結束，不用打字也不會對錯編號。
+
+export interface DuplicateCardData {
+  /** 'auto' 是姓名與電話都相同，'suggest' 是手機撞號但姓名不同 */
+  verdict: 'auto' | 'suggest'
+  primaryId: string
+  secondaryId: string
+  primaryName: string
+  secondaryName: string
+  primaryWhen: string
+  secondaryWhen: string
+  company: string
+  phone: string
+  /** 主檔已經有的場合與筆記數，讓使用者知道合併會保留什麼 */
+  primarySource: string
+  primaryNoteCount: number
+}
+
+export function duplicateBubble(d: DuplicateCardData) {
+  const confident = d.verdict === 'auto'
+
+  const nameRow = (label: string, name: string, when: string) => ({
+    type: 'box', layout: 'baseline', spacing: 'sm',
+    contents: [
+      { type: 'text', text: label, color: '#AAAAAA', size: 'xs', flex: 2 },
+      { type: 'text', text: clip(name, 14), color: '#333333', size: 'sm', flex: 5, wrap: true },
+      { type: 'text', text: when, color: '#AAAAAA', size: 'xxs', flex: 2, align: 'end' },
+    ],
+  })
+
+  return {
+    type: 'bubble',
+    size: 'kilo',
+    body: {
+      type: 'box', layout: 'vertical', spacing: 'sm',
+      contents: [
+        {
+          type: 'text',
+          text: confident ? '✅ 姓名與電話都相同' : '❓ 手機相同但姓名不同',
+          size: 'xs',
+          color: confident ? '#1DB446' : '#B26A00',
+          weight: 'bold',
+        },
+        ...(d.company
+          ? [{ type: 'text', text: clip(d.company, 28), size: 'xs', color: '#888888', wrap: true }]
+          : []),
+        { type: 'separator', margin: 'md' },
+        {
+          type: 'box', layout: 'vertical', margin: 'md', spacing: 'sm',
+          contents: [
+            nameRow('保留', d.primaryName || '（無名）', d.primaryWhen),
+            nameRow('併入', d.secondaryName || '（無名）', d.secondaryWhen),
+            ...(d.phone ? [{
+              type: 'box', layout: 'baseline', spacing: 'sm',
+              contents: [
+                { type: 'text', text: '電話', color: '#AAAAAA', size: 'xs', flex: 2 },
+                { type: 'text', text: clip(d.phone, 24), color: '#666666', size: 'sm', flex: 7, wrap: true },
+              ],
+            }] : []),
+          ],
+        },
+        // 合併會保留什麼要先講，不然使用者不敢按
+        {
+          type: 'box', layout: 'vertical', margin: 'md', paddingAll: 'sm',
+          backgroundColor: confident ? '#F2FAF5' : '#FFF4E5', cornerRadius: 'md',
+          contents: [
+            {
+              type: 'text',
+              text: `合併後保留上面那筆${d.primarySource && d.primarySource !== '其他' ? `（場合：${clip(d.primarySource, 12)}）` : ''}` +
+                    `${d.primaryNoteCount ? `，${d.primaryNoteCount} 則筆記都留著` : ''}`,
+              size: 'xxs', color: confident ? '#2E7D4F' : '#B26A00', wrap: true,
+            },
+            {
+              type: 'text', text: '按錯了可以跟我說「還原」，名片不會被刪除',
+              size: 'xxs', color: '#AAAAAA', margin: 'xs', wrap: true,
+            },
+          ],
+        },
+      ],
+    },
+    footer: {
+      type: 'box', layout: 'vertical', spacing: 'sm',
+      contents: [
+        {
+          type: 'button', style: 'primary', height: 'sm',
+          color: confident ? '#1DB446' : '#F5A623',
+          action: { type: 'postback', label: '🔗 合併成一筆',
+                    data: `merge:${d.primaryId}:${d.secondaryId}`,
+                    displayText: `合併 ${d.primaryName}` },
+        },
+        {
+          type: 'button', style: 'link', height: 'sm',
+          action: { type: 'postback', label: '✋ 不是同一人',
+                    data: `notdup:${d.primaryId}:${d.secondaryId}`,
+                    displayText: `${d.primaryName} 跟 ${d.secondaryName} 不是同一人` },
+        },
+      ],
+    },
+  }
+}
+
+export function duplicateCarousel(groups: DuplicateCardData[]) {
+  // LINE 的 carousel 上限 12 張，超過的留到下一次「檢查重複」再處理
+  const picked = groups.slice(0, 12)
+  const altText = clip(`${picked.length} 組可能重複的名片待處理`, MAX_ALT)
+  return picked.length === 1
+    ? { type: 'flex', altText, contents: duplicateBubble(picked[0]) }
+    : { type: 'flex', altText, contents: { type: 'carousel', contents: picked.map(duplicateBubble) } }
+}

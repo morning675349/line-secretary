@@ -114,7 +114,7 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://line-secretary-m6ji.vercel.
 
 `npm test`（Node 內建 test runner 加 `--experimental-strip-types`，不需額外依賴）。
 
-共 121 項，涵蓋 `event-matching`、`meeting-intel`、`weekly-report`、`batch`、`flex`、`flex-scan`、`business-progress`、`posting-schedule`、`expo-report`、`expo-voice`、`csv`、`contact-merge`。
+共 128 項，涵蓋 `event-matching`、`meeting-intel`、`weekly-report`、`batch`、`flex`、`flex-scan`、`business-progress`、`posting-schedule`、`expo-report`、`expo-voice`、`csv`、`contact-merge`。
 
 **這個專案的慣例是：會出錯的判斷邏輯一律抽成零 I/O 的純函式模組再測。**
 碰 Firestore 或外部 API 的那層不寫測試，靠型別檢查與正式環境驗證。
@@ -349,13 +349,27 @@ Next 16 的靜態路徑固定是 `_next/static/immutable/`，**沒有 per-build 
 
 `getContactById` 會跟著 `mergedInto` 走一層，因為合併前送出的卡片還留在對話記錄裡，使用者幾天後翻上去按按鈕時要改到活著的那筆。
 
-### 舊資料清理是兩段式
+### 舊資料清理：卡片式，一組一張
 
-`preview_duplicate_contacts` 產生提案存進 `pendingMerges`，使用者確認後才 `apply_duplicate_merges`。比照場合回補的做法，**system prompt 有明確禁止跳過確認**，改動時不要拿掉。
+`preview_duplicate_contacts` 送出 Flex carousel，一組重複一張卡片，上面兩顆按鈕：「🔗 合併成一筆」與「✋ 不是同一人」。
 
-`apply_duplicate_merges` 的 `selection` 可以傳 `auto`（只合併確定的）、`all`、或編號如 `1,3,5`。只處理一部分時提案會留著，可以接著處理剩下的。
+**第一版是回一段文字要使用者打「合併 1,2,5」，上線當天就被退回。** 編號跟人名的對應要自己在腦中維持，而且判斷錯了只能重打。一組一張卡片按完就結束，不用打字也不會對錯編號。
+
+卡片上刻意先寫出「合併後保留上面那筆（場合：xxx），N 則筆記都留著」，因為不講清楚保留什麼，使用者不敢按。
+
+**「不是同一人」一定要記住。** `dismissMergePair` 把配對寫進 `users/{id}.dismissedMergePairs`，`previewDuplicates` 會排除。不記的話每次檢查都再問同一組，被問第二次的提示等於沒有記憶，使用者會開始忽略所有提示，真正的重複也跟著被忽略。
+
+配對鍵用 `pairKey`（兩個 id 排序後串接），**必須跟順序無關**：同一組在不同次盤點裡誰是 primary 可能因為資料被改過而互換，鍵跟順序有關就會再問第二次。
+
+文字路徑仍然留著：`apply_duplicate_merges` 的 `selection` 可以傳 `auto`（只合併確定的）、`all`、或編號。卡片有 12 張上限，「合併確定的」一句話就能把確定的那幾組一次處理掉，比逐張按快。
 
 合併都可以用 `undo_merge` 還原，被併掉的名片從來沒有真的被刪除。
+
+### 改 Flex 卡片的規矩
+
+**動到卡片就要在 `/api/admin/validate-flex` 加對應的案例，不是「部署後跑一次既有的驗證」。**
+
+後者擋不住新增的分支。2026-10-29 出事的根因就是新卡片狀態沒被 LINE 驗過，而且十一天沒人碰到。同一天我加去重卡片時又差點重犯，所以能用測試守門的就寫測試（測試會跟著程式碼一起被迫更新），驗證端點是補那些測試驗不到的 LINE 規格。
 
 ## 還沒做的
 

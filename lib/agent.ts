@@ -11,9 +11,10 @@ import {
   mergeContactPair, unmergeContact,
   Contact, BackfillItem,
 } from './contact-service'
-import { describeGroup } from './contact-merge'
+
 import { getExpoMode, startExpoMode, endExpoMode } from './expo-mode'
-import { contactCarousel, ContactCardData } from './flex'
+import { contactCarousel, ContactCardData, duplicateCarousel } from './flex'
+import type { DuplicateCardData } from './flex'
 import { pushFlex, pushMessage } from './line-client'
 import { stripNoteTimestamp } from './meeting-intel'
 import { buildExpoReport, rankExpoContacts, tierOf } from './expo-report'
@@ -635,35 +636,55 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
     },
 
     async preview_duplicate_contacts() {
-      const groups = await previewDuplicates(lineUserId)
+      const groups = (await previewDuplicates(lineUserId))
+        .filter(g => g.primary.id && g.secondary.id)
       if (groups.length === 0) {
         await setPendingMerges(lineUserId, [])
         return '沒有重複的名片，名單是乾淨的。'
       }
 
-      const pairs = groups
-        .filter(g => g.primary.id && g.secondary.id)
-        .map(g => ({
-          primaryId: g.primary.id!,
-          secondaryId: g.secondary.id!,
-          label: describeGroup(g),
-          verdict: g.verdict,
-        }))
-      await setPendingMerges(lineUserId, pairs)
+      const when = (c: { createdAt?: { seconds: number } }) =>
+        c.createdAt
+          ? new Date(c.createdAt.seconds * 1000)
+              .toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' })
+          : '?'
 
-      const autoCount = pairs.filter(p => p.verdict === 'auto').length
-      const suggestCount = pairs.length - autoCount
-      const numbered = pairs.map((p, i) => `${i + 1}. ${p.label}`).join('\n')
+      // 卡片每組兩顆按鈕，按完就結束。
+      // 以前是回一段文字要使用者打「合併 1,2,5」，編號跟人名的對應要自己在腦中維持。
+      const cards: DuplicateCardData[] = groups.slice(0, 12).map(g => ({
+        verdict: g.verdict,
+        primaryId: g.primary.id!,
+        secondaryId: g.secondary.id!,
+        primaryName: g.primary.nameZh || g.primary.nameEn || '',
+        secondaryName: g.secondary.nameZh || g.secondary.nameEn || '',
+        primaryWhen: when(g.primary),
+        secondaryWhen: when(g.secondary),
+        company: g.primary.company || g.secondary.company || '',
+        phone: g.primary.mobile || g.primary.officePhone || '',
+        primarySource: g.primary.source || '',
+        primaryNoteCount: g.primary.notes?.length || 0,
+      }))
+
+      // 提案仍然存著，使用者想用「合併確定的」這種講法時 apply_duplicate_merges 才有東西可用
+      await setPendingMerges(lineUserId, groups.map(g => ({
+        primaryId: g.primary.id!,
+        secondaryId: g.secondary.id!,
+        label: `${g.primary.nameZh || g.primary.nameEn || ''}＋${g.secondary.nameZh || g.secondary.nameEn || ''}`,
+        verdict: g.verdict,
+      })))
+
+      await pushFlex(lineUserId, duplicateCarousel(cards))
+
+      const autoCount = groups.filter(g => g.verdict === 'auto').length
+      const suggestCount = groups.length - autoCount
+      const overflow = groups.length - cards.length
 
       return [
-        `找到 ${pairs.length} 組重複（尚未合併，等使用者確認）：`,
-        numbered,
-        '',
-        autoCount > 0 ? `其中 ${autoCount} 組姓名與電話都相同，確定是同一人。` : '',
-        suggestCount > 0 ? `另外 ${suggestCount} 組手機相同但姓名不同，可能是辨識錯字，也可能真的是兩個人共用號碼，需要使用者判斷。` : '',
-        '',
-        '請把這份清單原樣列給使用者，說明哪幾組確定、哪幾組要他判斷，並問他要合併哪些。',
-        '使用者確認後才呼叫 apply_duplicate_merges：只要確定的那幾組傳 auto，全部傳 all，指定幾組就傳編號。',
+        `已送出 ${cards.length} 張重複名片卡片，每張上面有「合併成一筆」與「不是同一人」兩顆按鈕。`,
+        `其中 ${autoCount} 組姓名與電話都相同，${suggestCount} 組手機相同但姓名不同需要他判斷。`,
+        overflow > 0 ? `另有 ${overflow} 組超過單次卡片上限，處理完這批再說一次「檢查重複」就會出現。` : '',
+        '卡片已經顯示完整資料與按鈕，你的回覆不要再用文字重複列一次這些人，簡短一句話即可。',
+        '可以順便告訴他：想一次處理掉確定的那幾組，直接說「合併確定的」就好，不必逐張按。',
       ].filter(Boolean).join('\n')
     },
 

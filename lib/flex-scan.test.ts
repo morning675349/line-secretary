@@ -1,7 +1,7 @@
 import assert from 'node:assert'
 import { test } from 'node:test'
-import { scanResultBubble, scanResultMessage, uncertainLabelsOf } from './flex.ts'
-import type { ScanCardData } from './flex.ts'
+import { scanResultBubble, scanResultMessage, uncertainLabelsOf, duplicateBubble, duplicateCarousel } from './flex.ts'
+import type { ScanCardData, DuplicateCardData } from './flex.ts'
 
 const mk = (over: Partial<ScanCardData> = {}): ScanCardData => ({
   contactId: 'c1', imageUrl: 'https://example.com/a.jpg',
@@ -105,4 +105,48 @@ test('手機撞號但姓名不同時給合併按鈕，並寫出是跟誰撞號',
 
 test('沒有撞號時不出現合併按鈕', () => {
   assert.doesNotMatch(JSON.stringify(scanResultBubble(mk())), /merge:/)
+})
+
+// ── 重複名片卡片（2026-10-29） ───────────────────────────────
+
+const mkDup = (over: Partial<DuplicateCardData> = {}): DuplicateCardData => ({
+  verdict: 'auto',
+  primaryId: 'old1', secondaryId: 'new1',
+  primaryName: '王小明', secondaryName: '王小明',
+  primaryWhen: '7/28', secondaryWhen: '10/29',
+  company: '測試股份有限公司', phone: '0912-345678',
+  primarySource: '測試場合', primaryNoteCount: 2,
+  ...over,
+})
+
+test('確定同一人與要判斷的兩種卡片要長得不一樣，不然使用者會亂按', () => {
+  assert.match(JSON.stringify(duplicateBubble(mkDup())), /姓名與電話都相同/)
+  assert.match(JSON.stringify(duplicateBubble(mkDup({ verdict: 'suggest' }))), /手機相同但姓名不同/)
+})
+
+test('卡片要先講合併會保留什麼，不然使用者不敢按', () => {
+  const json = JSON.stringify(duplicateBubble(mkDup()))
+  assert.match(json, /保留上面那筆/)
+  assert.match(json, /測試場合/, '要寫出主檔的場合')
+  assert.match(json, /2 則筆記/, '要寫出筆記會留著')
+  assert.match(json, /還原/, '要讓使用者知道按錯可以救')
+})
+
+test('兩顆按鈕的 postback 格式要跟 webhook 對得上，順序也不能顛倒', () => {
+  const json = JSON.stringify(duplicateBubble(mkDup()))
+  // primary 是保留的那筆，secondary 是被併掉的，顛倒會把舊的場合與筆記併進新的那筆
+  assert.match(json, /"merge:old1:new1"/)
+  assert.match(json, /"notdup:old1:new1"/)
+})
+
+test('超過 12 組只送前 12 張，剩下的留到下一次檢查', () => {
+  const many = Array.from({ length: 15 }, (_, i) => mkDup({ primaryId: `p${i}`, secondaryId: `s${i}` }))
+  const msg = duplicateCarousel(many) as any
+  assert.equal(msg.contents.type, 'carousel')
+  assert.equal(msg.contents.contents.length, 12)
+})
+
+test('只有一組時送單張不送 carousel', () => {
+  const msg = duplicateCarousel([mkDup()]) as any
+  assert.equal(msg.contents.type, 'bubble')
 })

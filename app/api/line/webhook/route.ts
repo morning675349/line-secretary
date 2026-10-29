@@ -20,7 +20,7 @@ import {
   setPendingSource, consumePendingSource, getLatestContact,
   consumePendingNote,
   setPendingCorrection, consumePendingCorrection,
-  findMergeForNewCard, mergeContactPair, refreshFollowUp,
+  findMergeForNewCard, mergeContactPair, refreshFollowUp, dismissMergePair,
 } from '@/lib/contact-service'
 import { runAgent } from '@/lib/agent'
 import { claimEvent } from '@/lib/dedup'
@@ -385,6 +385,19 @@ async function handlePostback(data: string, replyToken: string, lineUserId: stri
       result.ok
         ? `♻️ 已合併成一筆${result.changes.length ? `\n這次補上：${result.changes.join('、')}` : '\n兩筆內容相同，沒有需要補的欄位'}`
         : `⚠️ 合併沒有完成：${result.reason || '未知原因'}`
+    )
+    return
+  }
+
+  // 「不是同一人」：記下來，下次檢查重複不再問同一組
+  const notDupMatch = data.match(/^notdup:(\w+):(\w+)$/)
+  if (notDupMatch) {
+    const ok = await dismissMergePair(lineUserId, notDupMatch[1], notDupMatch[2])
+    await replyMessage(
+      replyToken,
+      ok
+        ? '👌 記住了，這兩筆是不同的人，以後檢查重複不會再問這一組'
+        : '⚠️ 找不到這兩筆名片，可能已經被合併或刪掉了'
     )
     return
   }

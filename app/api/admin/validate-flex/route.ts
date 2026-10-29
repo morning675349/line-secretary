@@ -2,8 +2,8 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 30
 
 import { NextRequest, NextResponse } from 'next/server'
-import { scanResultMessage, contactCarousel } from '@/lib/flex'
-import type { ScanCardData, ContactCardData } from '@/lib/flex'
+import { scanResultMessage, contactCarousel, duplicateCarousel } from '@/lib/flex'
+import type { ScanCardData, ContactCardData, DuplicateCardData } from '@/lib/flex'
 
 /**
  * 用 LINE 官方的「驗證但不送出」端點檢查我們組出來的 Flex 訊息。
@@ -48,6 +48,15 @@ export async function GET(req: NextRequest) {
     expoIndex: Number(q.get('expoIndex') || 0),
   }
 
+  const dupSample: DuplicateCardData = {
+    verdict: 'auto',
+    primaryId: 'testcontact1', secondaryId: 'testcontact2',
+    primaryName: '測試姓名', secondaryName: '測試姓名',
+    primaryWhen: '7/28', secondaryWhen: '10/29',
+    company: '測試股份有限公司', phone: '0900-000000',
+    primarySource: '測試場合', primaryNoteCount: 2,
+  }
+
   const contactSample: ContactCardData = {
     contactId: 'testcontact1', name: '測試姓名', company: '測試股份有限公司',
     title: '測試職稱', score: 8, category: '潛在客戶', status: '待跟進',
@@ -74,6 +83,17 @@ export async function GET(req: NextRequest) {
     validate('掃描卡片（併入＋展場模式）', scanResultMessage({
       ...sample, expoIndex: 5, mergedChanges: ['補上 Email'],
     })),
+    validate('重複名片卡片（確定同一人）', duplicateCarousel([dupSample])),
+    validate('重複名片卡片（要使用者判斷）', duplicateCarousel([
+      { ...dupSample, verdict: 'suggest', secondaryName: '測試姓名乙' },
+    ])),
+    validate('重複名片卡片（多張 carousel）', duplicateCarousel([
+      dupSample,
+      { ...dupSample, primaryId: 'testcontact3', secondaryId: 'testcontact4', verdict: 'suggest' },
+    ])),
+    validate('重複名片卡片（無公司無電話無場合無筆記）', duplicateCarousel([
+      { ...dupSample, company: '', phone: '', primarySource: '', primaryNoteCount: 0 },
+    ])),
     validate('聯絡人卡片（既有功能，對照組）', contactCarousel([contactSample])),
   ])
 

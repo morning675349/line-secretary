@@ -1,7 +1,7 @@
 import { db } from './firebase-admin'
 import { CardData } from './card-analyzer'
 import { Timestamp, QueryDocumentSnapshot, FieldValue } from 'firebase-admin/firestore'
-import { findMergeTargets, findDuplicateGroups, planMerge } from './contact-merge'
+import { findMergeTargets, findDuplicateGroups, planMerge, pairKey } from './contact-merge'
 import type { MergeCandidate, DuplicateGroup } from './contact-merge'
 
 export interface Contact extends CardData {
@@ -394,10 +394,48 @@ export async function unmergeContact(lineUserId: string, contactId: string): Pro
   return true
 }
 
-/** 盤點既有名單的重複組合，給「預覽後確認」的第一段用 */
+/**
+ * 盤點既有名單的重複組合，給「預覽後確認」的第一段用。
+ *
+ * 會排除使用者按過「不是同一人」的組合。不排除的話每次檢查都會再問一次，
+ * 被問第二次的提示等於沒有記憶，使用者會開始忽略所有提示，
+ * 真正的重複也跟著被忽略。
+ */
 export async function previewDuplicates(lineUserId: string): Promise<DuplicateGroup[]> {
-  const all = await fetchUserContacts(lineUserId)
+  const [all, dismissed] = await Promise.all([
+    fetchUserContacts(lineUserId),
+    getDismissedPairs(lineUserId),
+  ])
   return findDuplicateGroups(all as MergeCandidate[])
+    .filter(g => !dismissed.has(pairKey(g.primary.id || '', g.secondary.id || '')))
+}
+
+/** 使用者按過「不是同一人」的組合 */
+export async function getDismissedPairs(lineUserId: string): Promise<Set<string>> {
+  const doc = await db.collection('users').doc(lineUserId).get()
+  return new Set((doc.data()?.dismissedMergePairs as string[] | undefined) || [])
+}
+
+/**
+ * 記住這兩筆不是同一人。
+ *
+ * 只檢查擁有權不檢查是否真的相似：使用者說不是就不是，不需要系統同意。
+ */
+export async function dismissMergePair(
+  lineUserId: string,
+  idA: string,
+  idB: string
+): Promise<boolean> {
+  const [a, b] = await Promise.all([
+    assertOwnership(lineUserId, idA),
+    assertOwnership(lineUserId, idB),
+  ])
+  if (!a || !b) return false
+  await db.collection('users').doc(lineUserId).set(
+    { dismissedMergePairs: FieldValue.arrayUnion(pairKey(idA, idB)) },
+    { merge: true }
+  )
+  return true
 }
 
 export interface PendingMerge {
