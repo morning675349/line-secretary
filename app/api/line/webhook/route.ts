@@ -27,6 +27,7 @@ import { getExpoMode, bumpExpoCount, ExpoMode } from '@/lib/expo-mode'
 import { runBatch } from '@/lib/batch'
 import { transcribeAudio } from '@/lib/transcribe'
 import { appendSystemNote } from '@/lib/conversation'
+import { logError } from '@/lib/error-log'
 
 // 使用者白名單：agent 每句話都有 API 成本，單人系統不開放陌生人使用。
 // ALLOWED_LINE_USER_IDS 未設定時放行所有人（向下相容），設定後（逗號分隔）僅白名單可用。
@@ -179,19 +180,28 @@ async function handleImageMessage(messageId: string, replyToken: string, lineUse
       expoIndex,
     }))
   } catch (err) {
-    console.error('Flex 卡片送出失敗，退回純文字:', err)
+    await logError('scan.pushFlex', err, {
+      contactId,
+      hasHeroImage: !!imageUrl,
+      imageUrlLength: (imageUrl || '').length,
+      sourceResolved: !!source && source !== '其他',
+      expoIndex,
+      uncertainCount: (card.uncertainFields || []).length,
+      hasPhone: !!(card.mobile || card.officePhone),
+      hasEmail: !!card.email,
+      hasTitle: !!card.title,
+    })
     const followUpStr = followUpDate.toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' })
+    const uncertain = uncertainLabelsOf(card.uncertainFields || [])
     const lines = [
       expoIndex > 0 ? `📇 第 ${expoIndex} 張` : '✅ 名片已建檔',
-      cardLine(result.card),
-      result.card.title ? `職稱：${result.card.title}` : '',
-      (result.card.mobile || result.card.officePhone) ? `電話：${result.card.mobile || result.card.officePhone}` : '',
-      result.card.email ? `Email：${result.card.email}` : '',
-      result.source ? `場合：${result.source}` : '場合：⚠️ 未判定',
+      cardLine(card),
+      card.title ? `職稱：${card.title}` : '',
+      (card.mobile || card.officePhone) ? `電話：${card.mobile || card.officePhone}` : '',
+      card.email ? `Email：${card.email}` : '',
+      source ? `場合：${source}` : '場合：⚠️ 未判定',
       expoIndex === 0 ? `跟進：${followUpStr}` : '',
-      uncertainLabelsOf(result.card.uncertainFields || []).length
-        ? `⚠️ 這幾欄沒把握：${uncertainLabelsOf(result.card.uncertainFields || []).join('、')}`
-        : '',
+      uncertain.length ? `⚠️ 這幾欄沒把握：${uncertain.join('、')}` : '',
     ].filter(Boolean)
     await pushMessage(lineUserId, lines.join('\n'))
   }
@@ -458,7 +468,7 @@ export async function POST(req: NextRequest) {
         lineUserId
       )
     } catch (err) {
-      console.error('Batch image error:', err)
+      await logError('webhook.batchImage', err, { count: imageEvents.length })
       await notifyFailureQuietly('', lineUserId, '⚠️ 批次掃描發生錯誤，請稍後再試')
     }
   } else if (imageEvents.length === 1) {
@@ -467,7 +477,7 @@ export async function POST(req: NextRequest) {
     try {
       await handleImageMessage(e.message.id, e.replyToken, lineUserId)
     } catch (err) {
-      console.error('Image handling error:', err)
+      await logError('webhook.image', err, { messageId: e.message?.id || '' })
       await notifyFailureQuietly(e.replyToken, lineUserId, '⚠️ 發生錯誤，請稍後再試')
     }
   }
@@ -485,7 +495,7 @@ export async function POST(req: NextRequest) {
         await handlePostback(event.postback.data, replyToken, lineUserId)
       }
     } catch (err) {
-      console.error('Event handling error:', err)
+      await logError('webhook.event', err, { eventType: event.type, messageType: event.message?.type || '' })
       const msg = !process.env.OPENAI_API_KEY
         ? '⚠️ AI 引擎尚未設定（缺少 OPENAI_API_KEY），請先到 Vercel 環境變數補上'
         : '⚠️ 發生錯誤，請稍後再試'

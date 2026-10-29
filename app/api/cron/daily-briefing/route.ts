@@ -15,6 +15,7 @@ import {
 } from '@/lib/meeting-intel'
 import { buildWeeklyReport, WeeklyContactLite } from '@/lib/weekly-report'
 import { pruneProcessedEvents } from '@/lib/dedup'
+import { purgeOldErrorLogs } from '@/lib/error-log'
 
 // 一則行程最多附幾個人的情報，再多早報就變成落落長的資料庫傾印
 const MAX_INTEL_PER_EVENT = 2
@@ -161,6 +162,13 @@ export async function GET(req: NextRequest) {
     console.error('pruneProcessedEvents failed:', err)
   }
 
+  let errorLogsPurged = 0
+  try {
+    errorLogsPurged = await purgeOldErrorLogs()
+  } catch (err) {
+    console.error('purgeOldErrorLogs failed:', err)
+  }
+
   const failed = results.filter(r => r.error).length
-  return NextResponse.json({ ok: failed === 0, users: results.length, failed, pruned, results })
+  return NextResponse.json({ ok: failed === 0, users: results.length, failed, pruned, errorLogsPurged, results })
 }
