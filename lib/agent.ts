@@ -520,6 +520,16 @@ function toExpoLite(c: Contact): ExpoContactLite {
 }
 
 // 把 Contact 轉成匯出用的一列
+/** Firestore 的 Timestamp 轉成毫秒，純函式層不認得 Timestamp */
+function toStallLite(c: Contact): StallCandidate {
+  return {
+    id: c.id, nameZh: c.nameZh, nameEn: c.nameEn, company: c.company,
+    status: c.status, score: c.score,
+    statusChangedAtMs: c.statusChangedAt?.toMillis(),
+    createdAtMs: c.createdAt?.toMillis(),
+  }
+}
+
 function toExportRow(c: Contact): ExportRow {
   return {
     email: c.email || '',
@@ -558,14 +568,6 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       if (!c) return '目前人脈庫還沒有任何聯絡人。'
       return contactFull(c)
     },
-
-    // Firestore 的 Timestamp 轉成毫秒，純函式層不認得 Timestamp
-    const toStallLite = (c: Contact): StallCandidate => ({
-      id: c.id, nameZh: c.nameZh, nameEn: c.nameEn, company: c.company,
-      status: c.status, score: c.score,
-      statusChangedAtMs: c.statusChangedAt?.toMillis(),
-      createdAtMs: c.createdAt?.toMillis(),
-    })
 
     async list_pending_followups() {
       const all = await getPendingFollowUps(lineUserId)
