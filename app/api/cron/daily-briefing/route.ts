@@ -6,6 +6,8 @@ import { db } from '@/lib/firebase-admin'
 import { pushMessage, pushMessageWithQuickReply } from '@/lib/line-client'
 import { getTodayEvents } from '@/lib/google-calendar'
 import { getPendingFollowUps, getAllContacts, Contact } from '@/lib/contact-service'
+import { formatDueLine } from '@/lib/followup'
+import type { StallCandidate } from '@/lib/followup'
 import { getDeals, getPayments } from '@/lib/deal-service'
 import { requireCronAuth } from '@/lib/cron-auth'
 import { getPostingReminder, POSTING_REMINDER_OWNER } from '@/lib/posting-schedule'
@@ -66,6 +68,16 @@ function buildScheduleSection(events: EventLite[], contacts: Contact[], now: Dat
   return lines
 }
 
+/** Firestore 的 Timestamp 轉成毫秒，純函式層不認得 Timestamp */
+function toStallLite(c: Contact): StallCandidate {
+  return {
+    id: c.id, nameZh: c.nameZh, nameEn: c.nameEn, company: c.company,
+    status: c.status, score: c.score,
+    statusChangedAtMs: c.statusChangedAt?.toMillis(),
+    createdAtMs: c.createdAt?.toMillis(),
+  }
+}
+
 function isSundayInTaipei(now: Date): boolean {
   return new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Taipei', weekday: 'short' }).format(now) === 'Sun'
 }
@@ -110,13 +122,17 @@ export async function GET(req: NextRequest) {
       }
 
       if (followUps.length > 0) {
-        lines.push(`📋 今日需跟進（${followUps.length} 人）：`)
-        followUps.forEach(c => {
-          const name = c.nameZh || c.nameEn || '未知'
-          lines.push(`  · ${name}（${c.company}）⭐${c.score} ${c.category}`)
-        })
+        // 只列前幾筆但要講出總數。被截掉的那些如果悄悄消失，
+        // 使用者會以為只欠這幾個，實際上背後積了一堆。
+        const MAX_SHOWN = 5
+        const shown = followUps.slice(0, MAX_SHOWN)
+        const header = followUps.length > MAX_SHOWN
+          ? `📋 今日需跟進（列 ${shown.length}／共 ${followUps.length} 人）：`
+          : `📋 今日需跟進（${followUps.length} 人）：`
+        lines.push(header)
+        shown.forEach(c => lines.push(formatDueLine(toStallLite(c), now.getTime())))
         lines.push('')
-        lines.push('輸入「跟進」查看詳情')
+        lines.push('輸入「跟進」查看詳情，或說「大展排下週三」排下一次')
         lines.push('')
       }
 

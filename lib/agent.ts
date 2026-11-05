@@ -8,9 +8,13 @@ import {
   getContactsNeedingSource, setPendingBackfill, consumePendingBackfill,
   getContactsBySource, getAllContacts,
   previewDuplicates, setPendingMerges, getPendingMerges, clearPendingMerges,
-  mergeContactPair, unmergeContact,
+  mergeContactPair, unmergeContact, setFollowUpDate,
   Contact, BackfillItem,
 } from './contact-service'
+import { daysInStatus, normalizeFollowUpDate } from './followup'
+import type { StallCandidate } from './followup'
+import { summarizePursuit, formatPursuitReview, rankPursuit } from './pursuit'
+import type { PursuitLite } from './pursuit'
 
 import { getExpoMode, startExpoMode, endExpoMode } from './expo-mode'
 import { contactCarousel, ContactCardData, duplicateCarousel } from './flex'
@@ -195,6 +199,40 @@ const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       description: '把上一步 preview_source_backfill 的提案正式寫入資料庫。只有在使用者明確表示確認、要、好、寫入之後才可以呼叫。',
       strict: true,
       parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'review_worth_pursuing',
+      description: '盤點所有待跟進的人，分成「該追／可追／先放」三組，列出最該花時間的前幾位與理由，並統計哪些場合帶來最多值得追的人。使用者說「哪些值得追」「幫我看看該追誰」「名單整理一下」「先看重要的」時用這個。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          band: { type: 'string', enum: ['該追', '可追', '先放', '總覽'], description: '要看哪一組的名單；總覽是三組的統計加該追的前幾位' },
+        },
+        required: ['band'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'schedule_followup',
+      description: '排定某個聯絡人下一次要跟進的日期。使用者說「大展三月初再找他」「林董下週三再追」「這個月底前要回他」時用這個。date 要自己依現在時間換算成 YYYY-MM-DD。這是讓跟進變成循環的關鍵：沒有排下一次，那個人聯絡完就再也不會被提醒。',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '姓名或公司名' },
+          date: { type: 'string', description: '下次跟進日期，格式 YYYY-MM-DD' },
+          note: { type: 'string', description: '為什麼排這天，會存成筆記；沒有就傳空字串' },
+        },
+        required: ['name', 'date', 'note'],
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -521,12 +559,29 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
       return contactFull(c)
     },
 
+    // Firestore 的 Timestamp 轉成毫秒，純函式層不認得 Timestamp
+    const toStallLite = (c: Contact): StallCandidate => ({
+      id: c.id, nameZh: c.nameZh, nameEn: c.nameEn, company: c.company,
+      status: c.status, score: c.score,
+      statusChangedAtMs: c.statusChangedAt?.toMillis(),
+      createdAtMs: c.createdAt?.toMillis(),
+    })
+
     async list_pending_followups() {
-      const contacts = await getPendingFollowUps(lineUserId)
-      if (contacts.length === 0) return '目前沒有逾期的跟進任務。'
-      return contacts
-        .map(c => `${c.nameZh || c.nameEn}（${c.company}）⭐${c.score} ${c.category}｜建議：${c.followUpSuggestion}`)
-        .join('\n')
+      const all = await getPendingFollowUps(lineUserId)
+      if (all.length === 0) return '目前沒有逾期的跟進任務。'
+      const nowMs = Date.now()
+      const shown = all.slice(0, 10)
+      const lines = shown.map(c => {
+        const days = daysInStatus(toStallLite(c), nowMs)
+        const stage = c.status && c.status !== '待跟進' ? `｜${c.status}` : ''
+        const since = days !== null && days > 0 ? ` 已 ${days} 天` : ''
+        return `${c.nameZh || c.nameEn}（${c.company}）⭐${c.score} ${c.category}${stage}${since}｜建議：${c.followUpSuggestion}`
+      })
+      if (all.length > shown.length) {
+        lines.push(`（還有 ${all.length - shown.length} 位逾期未列出）`)
+      }
+      return lines.join('\n')
     },
 
     async update_contact_status({ name, status }) {
@@ -633,6 +688,60 @@ function buildHandlers(lineUserId: string): Record<string, (a: ToolArgs) => Prom
         applied++
       }
       return `已回補 ${applied} 筆聯絡人的認識場合。`
+    },
+
+    async review_worth_pursuing({ band }) {
+      const all = await getPendingFollowUps(lineUserId)
+      if (all.length === 0) return '目前沒有待跟進的聯絡人。'
+
+      const nowMs = Date.now()
+      const lite: PursuitLite[] = all.map(c => ({
+        id: c.id || '',
+        name: c.nameZh || c.nameEn || '未知',
+        company: c.company || '',
+        score: c.score ?? 0,
+        category: c.category || '',
+        source: c.source || '',
+        isDobBizPotential: !!c.isDobBizPotential,
+        noteCount: c.notes?.length ?? 0,
+        hasEmail: !!c.email,
+        hasPhone: !!(c.mobile || c.officePhone),
+        daysSinceCreated: Math.floor((nowMs - (c.createdAt?.toMillis() ?? nowMs)) / 86_400_000),
+      }))
+
+      if (band === '總覽') return formatPursuitReview(summarizePursuit(lite))
+
+      const picked = rankPursuit(lite).filter(r => r.band === band)
+      if (picked.length === 0) return `「${band}」這一組目前沒有人。`
+
+      // 逐筆列出會太長，LINE 一則訊息看不完也不會有人看完
+      const MAX = 15
+      const lines = [`${band}（${picked.length} 位）：`]
+      for (const r of picked.slice(0, MAX)) {
+        const company = r.company ? `（${r.company}）` : ''
+        const why = r.reasons.length ? `　${r.reasons.join('・')}` : ''
+        lines.push(`・${r.name}${company}⭐${r.score}${why}`)
+      }
+      if (picked.length > MAX) lines.push(`（還有 ${picked.length - MAX} 位未列出）`)
+      return lines.join('\n')
+    },
+
+    async schedule_followup({ name, date, note }) {
+      const c = await findContactByName(lineUserId, name)
+      if (!c || !c.id) return `找不到「${name}」，無法排跟進。`
+
+      // 日期是模型從口語換算的，一定要驗。最常見的錯是年份用成去年，
+      // 放過去的話那個人會立刻出現在「今日需跟進」，看起來像系統壞掉。
+      const norm = normalizeFollowUpDate(date, Date.now())
+      if (!norm.ok) return `日期有問題：${norm.reason}。請重新確認後再排一次。`
+
+      await setFollowUpDate(lineUserId, c.id, norm.ms!)
+      if (note) await addContactNote(lineUserId, c.id, note)
+
+      const shown = new Date(norm.ms!).toLocaleDateString('zh-TW', {
+        timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric', weekday: 'short',
+      })
+      return `已排定 ${c.nameZh || c.nameEn}（${c.company}）下次跟進：${shown}${note ? `，並記下「${note}」` : ''}。那天早報會提醒你。`
     },
 
     async preview_duplicate_contacts() {
@@ -1002,6 +1111,10 @@ function systemPrompt(): string {
 - 展後的完整動線是：戰果報告 → 批次起草跟進（draft_batch_followups）→ 匯出名單（export_contacts）。使用者看完報告後，主動提醒他可以接著做這兩件事
 - 批次起草一次五封，寫完若還有剩，主動告訴使用者說「再寫」就能續寫，並記得下次把 skip 往後加
 - 回補舊資料一定要兩步：先 preview_source_backfill 把清單給使用者看，等他明確說要，才 apply_source_backfill。絕不可以跳過確認直接寫入
+- 使用者覺得待跟進的人太多、不知道從哪開始時，先用 review_worth_pursuing 給他分組總覽，不要把一長串名單倒給他
+- 「該追」是固定名額的前幾位，不是「評分高的全部」。名單要做得完才有人會做
+- 聯絡完某個人之後，除了更新狀態，**一定要順便問「下次什麼時候跟」並用 schedule_followup 排進去**。沒排下一次的話那個人就從跟進清單消失了，這是這套系統最容易漏掉的地方
+- 使用者講出任何時間線索（「過年後再說」「等他們開完會」「三月初」）就直接排，不要再問一次
 - 合併重複名片同樣一定要兩步：先 preview_duplicate_contacts 列清單，等使用者明確說要合併哪些，才 apply_duplicate_merges。絕不可以跳過確認直接合併
 - 掃名片時「姓名與電話都相同」會自動合併，這是刻意的，不需要問。但「手機相同而姓名不同」永遠不自動合併，因為同公司不同人共用號碼是真的會發生
 - 無法確定使用者意圖時，簡短問清楚，不要長篇大論

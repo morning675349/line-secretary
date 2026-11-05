@@ -18,6 +18,12 @@ export interface Contact extends CardData {
   /** 被併進哪一筆。有值就代表這筆已經不是活的，所有查詢都要排除 */
   mergedInto?: string
   mergedAt?: Timestamp
+  /**
+   * 狀態最後一次變更的時間，用來算「卡在這個階段幾天」。
+   * 2026-11-05 才加的欄位，既有聯絡人沒有，所以判斷時要退回 createdAt
+   * （見 lib/followup.ts 的 daysInStatus）。
+   */
+  statusChangedAt?: Timestamp
 }
 
 /**
@@ -26,6 +32,9 @@ export interface Contact extends CardData {
  * 刻意不含 score、category、followUpDays、status 這些可能被人工調整過的欄位，
  * 也不含 createdAt。原則是新掃的那張只能補 primary 沒有的東西，不能改它已有的判斷。
  */
+/** 不再需要跟進的終點狀態。排跟進清單與卡關偵測都用這組 */
+const DONE_STATUSES = new Set(['成交', '引薦完成', '婉拒'])
+
 const MERGE_FILLABLE_FIELDS = [
   'nameZh', 'nameEn', 'company', 'companyEn', 'title', 'titleEn',
   'mobile', 'officePhone', 'fax', 'email', 'address', 'website',
@@ -77,10 +86,16 @@ export async function getAllContacts(lineUserId: string): Promise<Contact[]> {
 
 export async function getPendingFollowUps(lineUserId: string): Promise<Contact[]> {
   const now = Timestamp.now()
+  // 只排除終點狀態，不是只收「待跟進」。
+  //
+  // 原本只撈待跟進，所以「已提案」的案子就算排了跟進日期也不會被提醒，
+  // 等於標記完狀態那個人就從清單消失了。這是這套系統追蹤只管第一次的根因。
+  // 放寬之後，漏斗階段與「該什麼時候碰他」變成兩件獨立的事，各自記各自的。
   return (await fetchUserContacts(lineUserId))
-    .filter(c => c.status === '待跟進' && c.followUpAt && c.followUpAt <= now)
+    .filter(c => !DONE_STATUSES.has(c.status) && c.followUpAt && c.followUpAt <= now)
+    // 逾期最久的排前面。上限交給呼叫端決定，因為早報要知道積欠總數
+    // 才能寫「5／23 人」，被截斷的那 18 個不能讓它悄悄消失。
     .sort((a, b) => a.followUpAt.seconds - b.followUpAt.seconds)
-    .slice(0, 5)
 }
 
 // 驗證 contactId 確實屬於這個 LINE 使用者，避免任何人透過猜測/取得 contactId
@@ -93,7 +108,13 @@ async function assertOwnership(lineUserId: string, contactId: string): Promise<b
 
 export async function updateContactStatus(lineUserId: string, contactId: string, status: Contact['status']): Promise<boolean> {
   if (!(await assertOwnership(lineUserId, contactId))) return false
-  await db.collection('contacts').doc(contactId).update({ status })
+  // 一定要同時記下變更時間，否則算不出「卡在已提案幾天」。
+  // 狀態沒變也照寫是刻意的：使用者重新確認一次狀態也算有動作，
+  // 不該讓它繼續累積卡關天數。
+  await db.collection('contacts').doc(contactId).update({
+    status,
+    statusChangedAt: Timestamp.now(),
+  })
   return true
 }
 
@@ -476,5 +497,28 @@ export async function refreshFollowUp(
   const followUpAt = new Date()
   followUpAt.setDate(followUpAt.getDate() + days)
   await db.collection('contacts').doc(contactId).update({ followUpAt: Timestamp.fromDate(followUpAt) })
+  return true
+}
+
+/**
+ * 排定下一次跟進的日期。
+ *
+ * 跟 refreshFollowUp 的差別：那支是「從今天算 N 天後」，用在掃到重複名片時；
+ * 這支收的是明確日期，用在使用者說「三月初再找他」這種情境。
+ *
+ * 日期由 agent 從口語換算，但一定要先經過 lib/followup.ts 的
+ * normalizeFollowUpDate 驗過再進來，這一層只負責寫入。
+ */
+export async function setFollowUpDate(
+  lineUserId: string,
+  contactId: string,
+  atMs: number
+): Promise<boolean> {
+  if (!(await assertOwnership(lineUserId, contactId))) return false
+  // 刻意不動 status。漏斗階段與「下次什麼時候碰他」是兩件獨立的事，
+  // 「已提案，三月初再追」這種情況如果把狀態打回待跟進，階段資訊就不見了。
+  await db.collection('contacts').doc(contactId).update({
+    followUpAt: Timestamp.fromMillis(atMs),
+  })
   return true
 }
